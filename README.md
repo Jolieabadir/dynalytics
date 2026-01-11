@@ -10,12 +10,39 @@ Dynalytics processes climbing videos to extract pose data, track body position, 
 - **Coaches** who want data-driven feedback for their athletes
 - **Researchers** exploring biomechanics and movement optimization
 
+## Vision
+
+Dynalytics uses a **personalized model architecture**:
+
+```
+Base Model (trained on many climbers)
+         ↓
+    Generic "good form" knowledge
+         ↓
+User uploads their videos
+         ↓
+Fine-tuned Personal Model
+         ↓
+    Learns YOUR body, YOUR style
+```
+
+The base model provides immediate value from day one, while personal data fine-tunes recommendations to each climber's unique body type, flexibility, and style.
+
 ## Features
 
+### Current (Phase 1)
 - Pose estimation and body tracking
 - Joint angle calculation (12 angles per frame)
-- Center of mass tracking
-- Export data to CSV for further analysis
+- Export data to CSV for analysis
+
+### Planned
+- [ ] Data collection UI
+- [ ] Visualization overlay (skeleton + angles on video)
+- [ ] Rules engine for form feedback
+- [ ] Center of mass tracking
+- [ ] Move classification (lock-off, deadpoint, dyno, etc.)
+- [ ] ML-based movement predictions
+- [ ] Imbalance and injury risk detection
 
 ## Tracked Angles
 
@@ -71,23 +98,43 @@ dynalytics/
 ```bash
 git clone https://github.com/jolieabadir/dynalytics.git
 cd dynalytics
+python3.11 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+> Note: Requires Python 3.11 (MediaPipe doesn't support 3.13+ yet)
 
 ## Usage
 
 ```bash
+# Basic usage - outputs angles to CSV
 python main.py path/to/video.mov
+
+# Include raw landmark positions
+python main.py path/to/video.mov --landmarks
+
+# Specify output path
+python main.py path/to/video.mov --output my_data.csv
 ```
 
-## Roadmap
+## Data Pipeline
 
-- [ ] Core pose extraction pipeline
-- [ ] Joint angle calculations
-- [ ] Center of mass tracking
-- [ ] CSV data export
-- [ ] ML-based movement predictions
-- [ ] Imbalance and injury risk detection (PT applications)
+```
+Raw Video
+    ↓
+Dynalytics (pose extraction)
+    ↓
+Raw Angles CSV          ← Current phase
+    ↓
++ Rules / Labels
+    ↓
+Labeled Data CSV
+    ↓
+ML Training
+    ↓
+Predictions
+```
 
 ## License
 

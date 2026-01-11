@@ -30,15 +30,33 @@ class CSVExporter:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Get fieldnames from first frame
-        fieldnames = list(frames[0].to_dict().keys())
+        # Find first frame with pose data to build complete headers
+        reference_frame = None
+        for frame in frames:
+            if frame.has_pose():
+                reference_frame = frame
+                break
+        
+        if reference_frame is None:
+            raise ValueError("No frames with pose data to export")
+
+        # Build fieldnames from reference frame
+        fieldnames = ['frame_number', 'timestamp_ms']
+        for angle_name in reference_frame.angles.keys():
+            fieldnames.append(f'angle_{angle_name}')
 
         with open(output_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
 
             for frame in frames:
-                writer.writerow(frame.to_dict())
+                row = {
+                    'frame_number': frame.frame_number,
+                    'timestamp_ms': frame.timestamp_ms,
+                }
+                for angle_name in reference_frame.angles.keys():
+                    row[f'angle_{angle_name}'] = frame.angles.get(angle_name)
+                writer.writerow(row)
 
     def export_with_landmarks(self, frames: list[FrameData], 
                                output_path: str | Path) -> None:
@@ -55,16 +73,25 @@ class CSVExporter:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Find first frame with pose data to build complete headers
+        reference_frame = None
+        for frame in frames:
+            if frame.has_pose():
+                reference_frame = frame
+                break
+        
+        if reference_frame is None:
+            raise ValueError("No frames with pose data to export")
+
         # Build fieldnames: frame info + angles + landmarks
-        first_frame = frames[0]
         fieldnames = ['frame_number', 'timestamp_ms']
         
         # Add angle columns
-        for angle_name in first_frame.angles.keys():
+        for angle_name in reference_frame.angles.keys():
             fieldnames.append(f'angle_{angle_name}')
 
         # Add landmark columns
-        for landmark_name in first_frame.landmarks.keys():
+        for landmark_name in reference_frame.landmarks.keys():
             fieldnames.extend([
                 f'{landmark_name}_x',
                 f'{landmark_name}_y',
@@ -81,14 +108,20 @@ class CSVExporter:
                     'timestamp_ms': frame.timestamp_ms,
                 }
 
-                # Add angles
-                for angle_name, degrees in frame.angles.items():
-                    row[f'angle_{angle_name}'] = degrees
+                # Add angles (use None for frames without pose)
+                for angle_name in reference_frame.angles.keys():
+                    row[f'angle_{angle_name}'] = frame.angles.get(angle_name)
 
-                # Add landmarks
-                for landmark_name, landmark in frame.landmarks.items():
-                    row[f'{landmark_name}_x'] = landmark.x
-                    row[f'{landmark_name}_y'] = landmark.y
-                    row[f'{landmark_name}_visibility'] = landmark.visibility
+                # Add landmarks (use None for frames without pose)
+                for landmark_name in reference_frame.landmarks.keys():
+                    landmark = frame.landmarks.get(landmark_name)
+                    if landmark:
+                        row[f'{landmark_name}_x'] = landmark.x
+                        row[f'{landmark_name}_y'] = landmark.y
+                        row[f'{landmark_name}_visibility'] = landmark.visibility
+                    else:
+                        row[f'{landmark_name}_x'] = None
+                        row[f'{landmark_name}_y'] = None
+                        row[f'{landmark_name}_visibility'] = None
 
                 writer.writerow(row)
