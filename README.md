@@ -7,8 +7,7 @@ Dynalytics processes climbing videos to extract pose data, track body position, 
 ## Who is this for?
 
 - **Athletes** looking to analyze and improve their movement patterns
-- **Coaches** who want data-driven feedback for their athletes
-- **Researchers** exploring biomechanics and movement optimization
+- **Researchers** exploring biomechanics and movement optimization/or injury prevention
 
 ## Vision
 

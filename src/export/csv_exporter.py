@@ -1,127 +1,123 @@
 """
-CSVExporter class for exporting frame data to CSV.
+CSV export functionality.
 """
 import csv
 from pathlib import Path
+from typing import Union
 
 from ..analysis.frame_data import FrameData
 
 
 class CSVExporter:
     """
-    Exports a list of FrameData objects to CSV.
+    Exports frame data to CSV files.
     
     Usage:
         exporter = CSVExporter()
         exporter.export(frames, 'output.csv')
     """
 
-    def export(self, frames: list[FrameData], output_path: str | Path) -> None:
+    def export(self, frames: list[FrameData], path: Union[str, Path]) -> None:
         """
-        Export frame data to CSV file.
+        Export frame data to CSV (angles + speeds).
         
         Args:
             frames: List of FrameData objects
-            output_path: Path to output CSV file
+            path: Output file path
         """
         if not frames:
-            raise ValueError("No frames to export")
+            return
 
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Find first frame with pose data to build complete headers
-        reference_frame = None
-        for frame in frames:
-            if frame.has_pose():
-                reference_frame = frame
-                break
+        path = Path(path)
         
-        if reference_frame is None:
-            raise ValueError("No frames with pose data to export")
+        # Get all possible columns from first frame with data
+        sample_frame = next((f for f in frames if f.has_pose()), frames[0])
+        sample_dict = sample_frame.to_dict()
+        fieldnames = list(sample_dict.keys())
 
-        # Build fieldnames from reference frame
-        fieldnames = ['frame_number', 'timestamp_ms']
-        for angle_name in reference_frame.angles.keys():
-            fieldnames.append(f'angle_{angle_name}')
-
-        with open(output_path, 'w', newline='') as f:
+        with open(path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-
+            
             for frame in frames:
-                row = {
-                    'frame_number': frame.frame_number,
-                    'timestamp_ms': frame.timestamp_ms,
-                }
-                for angle_name in reference_frame.angles.keys():
-                    row[f'angle_{angle_name}'] = frame.angles.get(angle_name)
-                writer.writerow(row)
+                writer.writerow(frame.to_dict())
 
-    def export_with_landmarks(self, frames: list[FrameData], 
-                               output_path: str | Path) -> None:
+    def export_minimal(self, frames: list[FrameData], path: Union[str, Path]) -> None:
         """
-        Export frame data including raw landmark positions.
+        Export minimal frame data to CSV (angles + CoM speed only).
         
         Args:
             frames: List of FrameData objects
-            output_path: Path to output CSV file
+            path: Output file path
         """
         if not frames:
-            raise ValueError("No frames to export")
+            return
 
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Find first frame with pose data to build complete headers
-        reference_frame = None
-        for frame in frames:
-            if frame.has_pose():
-                reference_frame = frame
-                break
+        path = Path(path)
         
-        if reference_frame is None:
-            raise ValueError("No frames with pose data to export")
+        # Get columns from minimal dict
+        sample_frame = next((f for f in frames if f.has_pose()), frames[0])
+        sample_dict = sample_frame.to_dict_minimal()
+        fieldnames = list(sample_dict.keys())
 
-        # Build fieldnames: frame info + angles + landmarks
-        fieldnames = ['frame_number', 'timestamp_ms']
+        with open(path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for frame in frames:
+                writer.writerow(frame.to_dict_minimal())
+
+    def export_with_landmarks(
+        self, 
+        frames: list[FrameData], 
+        path: Union[str, Path]
+    ) -> None:
+        """
+        Export frame data with raw landmark positions.
         
-        # Add angle columns
-        for angle_name in reference_frame.angles.keys():
-            fieldnames.append(f'angle_{angle_name}')
+        Args:
+            frames: List of FrameData objects
+            path: Output file path
+        """
+        if not frames:
+            return
 
+        path = Path(path)
+        
+        # Build fieldnames including landmarks
+        sample_frame = next((f for f in frames if f.has_pose()), frames[0])
+        base_dict = sample_frame.to_dict()
+        fieldnames = list(base_dict.keys())
+        
         # Add landmark columns
-        for landmark_name in reference_frame.landmarks.keys():
+        landmark_names = list(sample_frame.landmarks.keys())
+        for name in landmark_names:
             fieldnames.extend([
-                f'{landmark_name}_x',
-                f'{landmark_name}_y',
-                f'{landmark_name}_visibility',
+                f'landmark_{name}_x',
+                f'landmark_{name}_y',
+                f'landmark_{name}_z',
+                f'landmark_{name}_visibility',
             ])
 
-        with open(output_path, 'w', newline='') as f:
+        with open(path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-
+            
             for frame in frames:
-                row = {
-                    'frame_number': frame.frame_number,
-                    'timestamp_ms': frame.timestamp_ms,
-                }
-
-                # Add angles (use None for frames without pose)
-                for angle_name in reference_frame.angles.keys():
-                    row[f'angle_{angle_name}'] = frame.angles.get(angle_name)
-
-                # Add landmarks (use None for frames without pose)
-                for landmark_name in reference_frame.landmarks.keys():
-                    landmark = frame.landmarks.get(landmark_name)
+                row = frame.to_dict()
+                
+                # Add landmark data
+                for name in landmark_names:
+                    landmark = frame.landmarks.get(name)
                     if landmark:
-                        row[f'{landmark_name}_x'] = landmark.x
-                        row[f'{landmark_name}_y'] = landmark.y
-                        row[f'{landmark_name}_visibility'] = landmark.visibility
+                        row[f'landmark_{name}_x'] = landmark.x
+                        row[f'landmark_{name}_y'] = landmark.y
+                        row[f'landmark_{name}_z'] = landmark.z
+                        row[f'landmark_{name}_visibility'] = landmark.visibility
                     else:
-                        row[f'{landmark_name}_x'] = None
-                        row[f'{landmark_name}_y'] = None
-                        row[f'{landmark_name}_visibility'] = None
-
+                        row[f'landmark_{name}_x'] = None
+                        row[f'landmark_{name}_y'] = None
+                        row[f'landmark_{name}_z'] = None
+                        row[f'landmark_{name}_visibility'] = None
+                
                 writer.writerow(row)
