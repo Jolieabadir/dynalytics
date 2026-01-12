@@ -30,10 +30,23 @@ class CSVExporter:
 
         path = Path(path)
         
-        # Get all possible columns from first frame with data
-        sample_frame = next((f for f in frames if f.has_pose()), frames[0])
-        sample_dict = sample_frame.to_dict()
-        fieldnames = list(sample_dict.keys())
+        # Build fieldnames by collecting ALL unique keys from ALL frames
+        # This ensures we don't miss any fields
+        all_keys = set()
+        for frame in frames:
+            if frame.has_pose():
+                all_keys.update(frame.to_dict().keys())
+        
+        # Sort fieldnames for consistent column order
+        # Put frame_number and timestamp first, then angles, then speeds/velocities
+        fieldnames = ['frame_number', 'timestamp_ms']
+        angle_fields = sorted([k for k in all_keys if k.startswith('angle_')])
+        speed_fields = sorted([k for k in all_keys if k.startswith('speed_')])
+        velocity_fields = sorted([k for k in all_keys if k.startswith('velocity_')])
+        
+        fieldnames.extend(angle_fields)
+        fieldnames.extend(speed_fields)
+        fieldnames.extend(velocity_fields)
 
         with open(path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -86,7 +99,7 @@ class CSVExporter:
         
         # Build fieldnames including landmarks
         sample_frame = next((f for f in frames if f.has_pose()), frames[0])
-        base_dict = sample_frame.to_dict()
+        base_dict = sample_frame.to_dict_minimal()  # Changed to minimal to avoid velocity/speed bloat
         fieldnames = list(base_dict.keys())
         
         # Add landmark columns
@@ -104,7 +117,7 @@ class CSVExporter:
             writer.writeheader()
             
             for frame in frames:
-                row = frame.to_dict()
+                row = frame.to_dict_minimal()  # Changed to minimal
                 
                 # Add landmark data
                 for name in landmark_names:
