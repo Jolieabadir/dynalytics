@@ -1,50 +1,75 @@
 # Dynalytics
 
-Extract and analyze climbing movement from video using computer vision.
+AI-powered movement analysis for climbing injury prevention and rehabilitation.
 
-Dynalytics processes climbing videos to extract pose data, track body position, and calculate joint angles — building a foundation for movement analysis and ML training.
+Dynalytics uses computer vision to analyze climbing movement patterns from video, identifying injury risk through joint angle and velocity analysis. The goal is to catch dangerous movement patterns before they lead to pain or injury.
+
+## Mission
+
+Most climbing injuries result from accumulated stress and poor movement patterns that go undetected until pain emerges. Dynalytics aims to change that by providing early detection and personalized feedback based on biomechanical analysis.
 
 ## Who is this for?
 
-- **Athletes** looking to analyze and improve their movement patterns
-- **Researchers** exploring biomechanics and movement optimization/or injury prevention
+- **Athletes** looking to prevent injuries and improve movement quality
+- **Physical Therapists** working with climbers in rehabilitation
+- **Researchers** exploring biomechanics and injury prevention in sports
 
-## Vision
+## How It Works
 
-Dynalytics uses a **personalized model architecture**:
+**Two-Stage AI Model:**
 
 ```
-Base Model (trained on many climbers)
-         ↓
-    Generic "good form" knowledge
-         ↓
-User uploads their videos
-         ↓
-Fine-tuned Personal Model
-         ↓
-    Learns YOUR body, YOUR style
+Stage 1: Base Model
+├─ Trains on diverse climber dataset
+├─ Learns general "safe" vs "risky" movement patterns
+└─ Recognizes patterns from joint angles & velocity
+
+Stage 2: Personalized Model
+├─ Fine-tunes on individual user's movement data
+├─ Adapts to their specific body type and style
+└─ Provides accurate, personalized feedback
 ```
 
-The base model provides immediate value from day one, while personal data fine-tunes recommendations to each climber's unique body type, flexibility, and style.
+The base model provides immediate value, while personalization improves accuracy over time as it learns each user's unique biomechanics.
 
-## Features
+## Current Status
 
-### Current (Phase 1)
-- ✅ Pose estimation and body tracking
-- ✅ Joint angle calculation (12 angles per frame)
-- ✅ Velocity and speed tracking (center of mass + all landmarks)
-- ✅ Export data to CSV for analysis
-- ✅ Live visualization with skeleton overlay and angle display
+### Phase 1: Pose Extraction & Analysis ✅
+- Real-time pose estimation using MediaPipe
+- 12 joint angle calculations per frame
+- Velocity and speed tracking (center of mass + all landmarks)
+- CSV export with 40 data points per frame
+- Live visualization with skeleton overlay
 
-### Planned
-- [ ] Data collection UI
-- [ ] Rules engine for form feedback
-- [ ] Move classification (lock-off, deadpoint, dyno, etc.)
-- [ ] ML-based movement predictions
-- [ ] Imbalance and injury risk detection
+### Phase 2: Data Collection & ML (In Progress)
+Focus: Building the foundation for quality training data
 
-## Tracked Angles
+**Current Priority:**
+- Web-based data collection interface
+- Database design for temporal movement sequences
+- Structured labeling system for isolated moves
+- Understanding optimal data structure for ML training
 
+**Data Collection Approach:**
+Users will upload short (2-3 second) clips of isolated moves:
+- Example: Right arm lock-off, specific crimp position, dyno catch
+- Structured questionnaire: move type, difficulty, pain/discomfort
+- Clinical validation through PT collaboration
+
+**Key Metrics:**
+- Joint angles (12 per frame)
+- Velocity/speed measurements
+- Temporal patterns across movement sequences
+
+### Phase 3: Model Training (Next)
+- Base model for movement pattern recognition
+- Injury risk classification
+- Personalized model fine-tuning
+- Real-time feedback system
+
+## Tracked Measurements
+
+### Joint Angles (12 per frame)
 | Angle | Points | What it measures |
 |-------|--------|------------------|
 | Left elbow | shoulder → elbow → wrist | Arm bend |
@@ -60,12 +85,25 @@ The base model provides immediate value from day one, while personal data fine-t
 | Upper back | left shoulder → shoulder midpoint → right shoulder | Shoulder hunch/openness |
 | Lower back | shoulder midpoint → hip midpoint → knee midpoint | Torso arch/round |
 
+### Speed & Velocity
+- Center of mass speed and velocity (x, y)
+- Individual landmark speeds (15 points)
+- Key landmark velocities: wrists and hips (x, y components)
+
 ## Tech Stack
 
-- Python
+**Current (Phase 1):**
+- Python 3.11
 - OpenCV
 - MediaPipe
-- TensorFlow
+- NumPy
+
+**Planned (Phase 2-3):**
+- Backend: Flask/FastAPI
+- Database: PostgreSQL
+- ML: PyTorch
+- Frontend: React
+- Infrastructure: Docker, AWS/GCP
 
 ## Project Structure
 
@@ -73,17 +111,17 @@ The base model provides immediate value from day one, while personal data fine-t
 dynalytics/
 ├── src/
 │   ├── core/
-│   │   ├── landmark.py         # Landmark class (x, y, visibility)
-│   │   └── angle.py            # Angle class (3 points → degrees)
+│   │   ├── landmark.py         # Landmark class (x, y, z, visibility)
+│   │   └── angle.py            # Angle calculation (3 points → degrees)
 │   ├── pose/
-│   │   └── estimator.py        # PoseEstimator class (wraps MediaPipe)
+│   │   └── estimator.py        # PoseEstimator (wraps MediaPipe)
 │   ├── analysis/
-│   │   ├── joint_analyzer.py   # JointAnalyzer class (calculates all 12 angles)
-│   │   └── frame_data.py       # FrameData class (holds all data for one frame)
+│   │   ├── joint_analyzer.py   # JointAnalyzer (calculates 12 angles)
+│   │   └── frame_data.py       # FrameData (holds all frame data)
 │   ├── export/
-│   │   └── csv_exporter.py     # CSVExporter class
+│   │   └── csv_exporter.py     # CSVExporter
 │   └── config/
-│       └── settings.py         # Settings class (thresholds, constants)
+│       └── settings.py         # Settings & thresholds
 ├── tests/
 ├── data/                       # Output CSVs (gitignored)
 ├── videos/                     # Input videos (gitignored)
@@ -122,7 +160,7 @@ python main.py path/to/video.mov --output my_data.csv
 
 ### Step 2: Visualize Results
 
-After extracting pose data with landmarks, you can view it with a live overlay:
+After extracting pose data with landmarks, view it with live overlay:
 
 ```bash
 # Play video with skeleton and angle overlay
@@ -152,44 +190,37 @@ python visualizer_live.py video.mov data.csv --no-angles
 python visualizer_live.py video.mov data.csv --no-speed
 ```
 
-## Complete Workflow Example
-
-```bash
-# 1. Extract pose data with landmarks
-python main.py videos/climb.mp4 --landmarks
-
-# 2. View results with live visualization
-python visualizer_live.py videos/climb.mp4 data/climb.csv
-
-# 3. Analyze CSV data in your favorite tool (Excel, Python, etc.)
-```
-
 ## Data Output
 
-The CSV export includes:
-- **Frame metadata**: frame number, timestamp
-- **12 joint angles**: elbow, knee, shoulder, hip, ankle, upper/lower back
-- **Landmark speeds**: individual joint movement speeds
-- **Center of mass metrics**: velocity (x, y) and speed
-- **Key landmark velocities**: wrists and hips (x, y components)
+Each processed video generates a CSV with 40 columns per frame:
+- **Metadata:** frame_number, timestamp_ms
+- **Angles:** 12 joint angles in degrees
+- **Speeds:** 15 landmark speeds + center of mass
+- **Velocities:** x, y components for wrists, hips, center of mass
 
-## Data Pipeline
+Example row (frame with detected pose):
+```
+frame_number,timestamp_ms,angle_left_elbow,angle_right_elbow,...,speed_center_of_mass,velocity_left_wrist_x,...
+42,1400.5,145.2,152.8,...,98.3,12.5,...
+```
 
-```
-Raw Video
-    ↓
-Dynalytics (pose extraction)
-    ↓
-Raw Angles + Speeds CSV     ← Current phase
-    ↓
-+ Rules / Labels
-    ↓
-Labeled Data CSV
-    ↓
-ML Training
-    ↓
-Predictions
-```
+## Broader Applications
+
+While currently focused on climbing, the methodology applies to any context where repetitive movement patterns contribute to injury:
+- **Sports:** Gymnastics, weightlifting, running, tennis
+- **Manual Labor:** Construction, manufacturing, warehouse work
+- **Rehabilitation:** Physical therapy movement analysis
+
+## Project Timeline
+
+**Started:** 2021 (initial prototype)
+**Rebooted:** 2024 (with improved ML and software engineering)
+**Current:** Phase 1 complete, Phase 2 in progress
+**Next:** Data collection interface and model training
+
+## Related Work
+
+- Original prototype: [computervision-climbing](https://github.com/jolie-aba/computervision-climbing) (2021)
 
 ## License
 
