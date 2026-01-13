@@ -220,7 +220,7 @@ While currently focused on climbing, the methodology applies to any context wher
 
 ## Related Work
 
-- Original prototype: [computervision-climbing](https://github.com/jolie-aba/computervision-climbing) (2021)
+- Original prototype: [computervision-climbing](https://github.com/jolie-aba/computervision-climbing) (2023)
 
 ## License
 
