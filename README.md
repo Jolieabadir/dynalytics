@@ -213,8 +213,8 @@ While currently focused on climbing, the methodology applies to any context wher
 
 ## Project Timeline
 
-**Started:** 2021 (initial prototype)
-**Rebooted:** 2024 (with improved ML and software engineering)
+**Started:** 2023 (initial prototype)
+**Rebooted:** 2026 (with improved ML and software engineering)
 **Current:** Phase 1 complete, Phase 2 in progress
 **Next:** Data collection interface and model training
 
