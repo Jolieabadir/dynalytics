@@ -41,25 +41,30 @@ The base model provides immediate value, while personalization improves accuracy
 - CSV export with 40 data points per frame
 - Live visualization with skeleton overlay
 
-### Phase 2: Data Collection & ML (In Progress)
+### Phase 2: Data Collection UI 🚧
 Focus: Building the foundation for quality training data
 
-**Current Priority:**
-- Web-based data collection interface
-- Database design for temporal movement sequences
-- Structured labeling system for isolated moves
-- Understanding optimal data structure for ML training
+**Completed:**
+- [x] Web-based data collection interface (React + FastAPI)
+- [x] Video upload and automatic pose extraction
+- [x] Frame-by-frame video scrubbing with keyboard shortcuts
+- [x] Move selection (mark start/end frames with `[` and `]` keys)
+- [x] Move labeling form (type, quality, contextual details)
+- [x] Skeleton overlay on video (working, needs scaling fix)
+- [x] Moves list display
+- [x] SQLite database for videos and labeled moves
+
+**Next:**
+- [ ] Frame-level labels within moves (initiation, peak, contact phases)
+- [ ] Fix skeleton overlay scaling
+- [ ] Export labeled data for ML training
 
 **Data Collection Approach:**
-Users will upload short (2-3 second) clips of isolated moves:
-- Example: Right arm lock-off, specific crimp position, dyno catch
-- Structured questionnaire: move type, difficulty, pain/discomfort
-- Clinical validation through PT collaboration
-
-**Key Metrics:**
-- Joint angles (12 per frame)
-- Velocity/speed measurements
-- Temporal patterns across movement sequences
+Users upload climbing clips and label isolated moves:
+- Mark start/end frames for each move
+- Classify move type: deadpoint, dyno, lock-off, flag, etc.
+- Rate quality and add contextual details
+- (Future) Add frame-level phase labels
 
 ### Phase 3: Model Training (Next)
 - Base model for movement pattern recognition
@@ -92,17 +97,20 @@ Users will upload short (2-3 second) clips of isolated moves:
 
 ## Tech Stack
 
-**Current (Phase 1):**
+**Phase 1 (Complete):**
 - Python 3.11
 - OpenCV
 - MediaPipe
 - NumPy
 
-**Planned (Phase 2-3):**
-- Backend: Flask/FastAPI
-- Database: PostgreSQL
+**Phase 2 (Current):**
+- Backend: FastAPI, SQLite
+- Frontend: React, Vite
+- CV: MediaPipe (via Python CLI)
+
+**Phase 3 (Planned):**
 - ML: PyTorch
-- Frontend: React
+- Database: PostgreSQL (migration from SQLite)
 - Infrastructure: Docker, AWS/GCP
 
 ## Project Structure
@@ -122,6 +130,17 @@ dynalytics/
 │   │   └── csv_exporter.py     # CSVExporter
 │   └── config/
 │       └── settings.py         # Settings & thresholds
+├── data_collection/
+│   ├── backend/                # FastAPI server
+│   │   ├── src/web/api.py      # REST endpoints
+│   │   ├── videos/             # Uploaded videos (gitignored)
+│   │   └── data/               # CSVs + SQLite DB (gitignored)
+│   └── frontend/               # React app
+│       └── src/components/
+│           ├── VideoPlayer.jsx     # Video playback + controls
+│           ├── SkeletonOverlay.jsx # Pose visualization
+│           ├── MoveForm.jsx        # Move labeling form
+│           └── MovesList.jsx       # Display labeled moves
 ├── tests/
 ├── data/                       # Output CSVs (gitignored)
 ├── videos/                     # Input videos (gitignored)
@@ -145,7 +164,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Step 1: Extract Pose Data
+### CLI: Extract Pose Data
 
 ```bash
 # Basic usage - outputs angles and speeds to CSV
@@ -158,7 +177,7 @@ python main.py path/to/video.mov --landmarks
 python main.py path/to/video.mov --output my_data.csv
 ```
 
-### Step 2: Visualize Results
+### CLI: Visualize Results
 
 After extracting pose data with landmarks, view it with live overlay:
 
@@ -190,13 +209,36 @@ python visualizer_live.py video.mov data.csv --no-angles
 python visualizer_live.py video.mov data.csv --no-speed
 ```
 
+### Web UI: Data Collection
+
+```bash
+# Terminal 1 - Backend
+cd data_collection/backend
+source venv/bin/activate
+uvicorn src.web.api:app --reload
+
+# Terminal 2 - Frontend
+cd data_collection/frontend
+npm run dev
+```
+
+Open http://localhost:5173
+
+**Keyboard Shortcuts:**
+- **Space** - Play/Pause
+- **← →** - Step frame by frame
+- **[** - Mark move start
+- **]** - Mark move end
+- **S** - Toggle skeleton overlay
+
 ## Data Output
 
-Each processed video generates a CSV with 40 columns per frame:
+Each processed video generates a CSV with 40+ columns per frame:
 - **Metadata:** frame_number, timestamp_ms
 - **Angles:** 12 joint angles in degrees
 - **Speeds:** 15 landmark speeds + center of mass
 - **Velocities:** x, y components for wrists, hips, center of mass
+- **Landmarks:** x, y, z, visibility for 15 body points (with --landmarks flag)
 
 Example row (frame with detected pose):
 ```
@@ -215,8 +257,8 @@ While currently focused on climbing, the methodology applies to any context wher
 
 **Started:** 2023 (initial prototype)
 **Rebooted:** 2026 (with improved ML and software engineering)
-**Current:** Phase 1 complete, Phase 2 in progress
-**Next:** Data collection interface and model training
+**Current:** Phase 2 - Data Collection UI
+**Next:** Frame-level labels, then model training
 
 ## Related Work
 
