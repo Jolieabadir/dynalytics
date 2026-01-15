@@ -1,15 +1,17 @@
 /**
- * VideoPlayer component.
+ * VideoPlayer component with skeleton overlay.
  * 
- * Plays video with frame-accurate scrubbing.
- * Allows marking move boundaries with [ and ] keys.
+ * Plays video with frame-accurate scrubbing and optional pose visualization.
  */
 import { useRef, useEffect, useState } from 'react';
 import useStore from '../store/useStore';
+import SkeletonOverlay from './SkeletonOverlay';
 
 function VideoPlayer() {
   const videoRef = useRef(null);
   const [duration, setDuration] = useState(0);
+  const [csvData, setCsvData] = useState(null);
+  const [showSkeleton, setShowSkeleton] = useState(true);
   
   const {
     currentVideo,
@@ -26,6 +28,38 @@ function VideoPlayer() {
   } = useStore();
 
   const fps = currentVideo?.fps || 30;
+
+  // Load CSV data when video changes
+  useEffect(() => {
+    if (!currentVideo) return;
+
+    const loadCSV = async () => {
+      try {
+        const response = await fetch(`http://localhost:8000/api/videos/${currentVideo.id}/csv`);
+        const csvText = await response.text();
+        
+        // Parse CSV
+        const lines = csvText.split('\n');
+        const headers = lines[0].split(',');
+        
+        const data = lines.slice(1).map(line => {
+          const values = line.split(',');
+          const row = {};
+          headers.forEach((header, i) => {
+            row[header.trim()] = values[i]?.trim();
+          });
+          return row;
+        }).filter(row => row.frame_number); // Remove empty rows
+        
+        setCsvData(data);
+        console.log(`Loaded ${data.length} frames of pose data`);
+      } catch (error) {
+        console.error('Failed to load CSV:', error);
+      }
+    };
+
+    loadCSV();
+  }, [currentVideo]);
 
   // Update current frame as video plays
   useEffect(() => {
@@ -68,6 +102,11 @@ function VideoPlayer() {
         case ']':
           e.preventDefault();
           setMoveEnd(currentFrame);
+          break;
+        case 's':
+        case 'S':
+          e.preventDefault();
+          setShowSkeleton(prev => !prev);
           break;
       }
     };
@@ -116,6 +155,14 @@ function VideoPlayer() {
           src={`http://localhost:8000/videos/${currentVideo.filename}`}
           onLoadedMetadata={handleLoadedMetadata}
         />
+        
+        {showSkeleton && csvData && (
+          <SkeletonOverlay
+            videoRef={videoRef}
+            currentFrame={currentFrame}
+            csvData={csvData}
+          />
+        )}
       </div>
 
       <div className="video-controls">
@@ -129,6 +176,14 @@ function VideoPlayer() {
           Frame: {currentFrame} / {currentVideo.total_frames}
           {' '}({(currentFrame / fps).toFixed(2)}s)
         </div>
+
+        <button 
+          onClick={() => setShowSkeleton(!showSkeleton)}
+          className={`skeleton-toggle ${showSkeleton ? 'active' : ''}`}
+          title="Toggle skeleton (S key)"
+        >
+          {showSkeleton ? '👁️ Hide' : '👁️ Show'} Skeleton
+        </button>
       </div>
 
       <div className="timeline">

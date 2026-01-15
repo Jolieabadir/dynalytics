@@ -2059,3 +2059,40 @@ body {
     flex: 1;
   }
 }
+/* Skeleton Overlay Styles */
+
+.video-container {
+  position: relative;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.video-container video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.skeleton-toggle {
+  background: #3a3a3a;
+  color: #e0e0e0;
+  border: 2px solid #3a3a3a;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.3s;
+  margin-left: auto;
+}
+
+.skeleton-toggle:hover {
+  background: #4a4a4a;
+}
+
+.skeleton-toggle.active {
+  background: #4CAF50;
+  border-color: #4CAF50;
+  color: white;
+}

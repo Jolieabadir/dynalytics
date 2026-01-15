@@ -169,10 +169,10 @@ def process_video(video_path: Path) -> dict:
     # Run pose extraction
     csv_path = Path('data') / f"{video_path.stem}.csv"
     result = subprocess.run(
-    [sys.executable, '../../main.py', str(video_path), '--output', str(csv_path)],
+        [sys.executable, '../../main.py', str(video_path), '--output', str(csv_path), '--landmarks'],
         capture_output=True,
         text=True
-    )
+)
     
     if result.returncode != 0:
         raise RuntimeError(f"Pose extraction failed: {result.stderr}")
