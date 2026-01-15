@@ -12,6 +12,7 @@ from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 import shutil
+import sys
 import subprocess
 
 from ..labeling.database import Database
@@ -168,7 +169,7 @@ def process_video(video_path: Path) -> dict:
     # Run pose extraction
     csv_path = Path('data') / f"{video_path.stem}.csv"
     result = subprocess.run(
-    ['python', '../../main.py', str(video_path), '--output', str(csv_path)],
+    [sys.executable, '../../main.py', str(video_path), '--output', str(csv_path)],
         capture_output=True,
         text=True
     )
@@ -279,8 +280,10 @@ async def upload_video(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     
     try:
-        # Process video (extract poses)
+    # Process video (extract poses)
+        print(f"DEBUG: About to process video: {video_path}")
         metadata = process_video(video_path)
+        print(f"DEBUG: Processing complete: {metadata}")
         
         # Create video record
         video = Video(
