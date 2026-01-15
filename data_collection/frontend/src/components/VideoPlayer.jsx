@@ -22,6 +22,7 @@ function VideoPlayer() {
     setMoveStart,
     setMoveEnd,
     setShowMoveForm,
+    clearMoveSelection,
   } = useStore();
 
   const fps = currentVideo?.fps || 30;
@@ -66,10 +67,7 @@ function VideoPlayer() {
           break;
         case ']':
           e.preventDefault();
-          if (moveStart !== null) {
-            setMoveEnd(currentFrame);
-            setShowMoveForm(true);
-          }
+          setMoveEnd(currentFrame);
           break;
       }
     };
@@ -99,6 +97,12 @@ function VideoPlayer() {
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
       setDuration(videoRef.current.duration);
+    }
+  };
+
+  const handleCreateMove = () => {
+    if (moveStart !== null && moveEnd !== null) {
+      setShowMoveForm(true);
     }
   };
 
@@ -158,21 +162,30 @@ function VideoPlayer() {
           [ Mark Start
         </button>
         <button 
-          onClick={() => {
-            if (moveStart !== null) {
-              setMoveEnd(currentFrame);
-              setShowMoveForm(true);
-            }
-          }}
+          onClick={() => setMoveEnd(currentFrame)}
           disabled={moveStart === null}
         >
           ] Mark End
         </button>
         
         {moveStart !== null && moveEnd !== null && (
-          <span className="selection-info">
-            Selected: {moveStart} - {moveEnd} ({moveEnd - moveStart} frames)
-          </span>
+          <>
+            <span className="selection-info">
+              Selected: {moveStart} - {moveEnd} ({moveEnd - moveStart} frames)
+            </span>
+            <button 
+              onClick={handleCreateMove}
+              className="create-move-btn"
+            >
+              Create Move
+            </button>
+            <button 
+              onClick={clearMoveSelection}
+              className="clear-selection-btn"
+            >
+              Clear Selection
+            </button>
+          </>
         )}
       </div>
     </div>
