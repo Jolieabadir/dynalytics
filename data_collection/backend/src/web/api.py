@@ -168,7 +168,7 @@ def process_video(video_path: Path) -> dict:
     # Run pose extraction
     csv_path = Path('data') / f"{video_path.stem}.csv"
     result = subprocess.run(
-        ['python', 'main.py', str(video_path), '--output', str(csv_path)],
+    ['python', '../../main.py', str(video_path), '--output', str(csv_path)],
         capture_output=True,
         text=True
     )

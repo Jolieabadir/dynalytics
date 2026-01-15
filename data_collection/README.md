@@ -11,6 +11,41 @@ This UI allows you to:
 4. Tag specific frames with sensations (pain, instability, weakness)
 5. Export labeled training data as CSV
 
+## Current Status
+
+### Working
+- Video upload with automatic pose extraction
+- Video player with frame-by-frame controls
+- Keyboard shortcuts (←/→, Space, [, ])
+- Timeline with move markers
+- Backend API connection
+
+### To Build
+- **MovesList** - Display completed moves
+- **MoveForm** - Two-step form with contextual questions per move type
+- **TaggingMode** - Cropped video with frame tagging (P/I/W shortcuts)
+- **Export** - Download labeled CSV
+
+### Setup
+
+**Start Backend:**
+```bash
+cd data_collection/backend
+source ../../venv/bin/activate
+uvicorn src.web.api:app --reload
+```
+
+**Start Frontend:**
+```bash
+cd data_collection/frontend
+npm run dev
+```
+
+Backend: `http://localhost:8000`  
+Frontend: `http://localhost:5173`
+
+---
+
 ## UI Prototype
 
 ### Main View (Define Moves)

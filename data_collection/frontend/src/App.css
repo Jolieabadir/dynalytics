@@ -1,0 +1,287 @@
+/**
+ * Basic styles for Dynalytics UI
+ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #1a1a1a;
+  color: #e0e0e0;
+}
+
+.app {
+  min-height: 100vh;
+}
+
+.app-header {
+  background: #2a2a2a;
+  padding: 1rem 2rem;
+  border-bottom: 2px solid #3a3a3a;
+}
+
+.app-header h1 {
+  color: #4CAF50;
+  font-size: 1.8rem;
+  margin-bottom: 0.25rem;
+}
+
+.app-header p {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+/* Loading */
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  font-size: 1.5rem;
+}
+
+/* Video Upload */
+.video-upload {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: calc(100vh - 100px);
+  padding: 2rem;
+}
+
+.upload-container {
+  text-align: center;
+  max-width: 500px;
+}
+
+.upload-container h2 {
+  margin-bottom: 1rem;
+  color: #4CAF50;
+}
+
+.upload-area {
+  margin: 2rem 0;
+}
+
+.upload-button {
+  display: inline-block;
+  padding: 1rem 2rem;
+  background: #4CAF50;
+  color: white;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1.1rem;
+  transition: background 0.3s;
+}
+
+.upload-button:hover {
+  background: #45a049;
+}
+
+.upload-hint {
+  margin-top: 1rem;
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.upload-progress {
+  margin: 2rem 0;
+}
+
+.spinner {
+  border: 4px solid #3a3a3a;
+  border-top: 4px solid #4CAF50;
+  border-radius: 50%;
+  width: 50px;
+  height: 50px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.progress-detail {
+  color: #888;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.error-message {
+  background: #f44336;
+  color: white;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-top: 1rem;
+}
+
+/* Video Player */
+.video-player {
+  background: #2a2a2a;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem;
+}
+
+.video-container {
+  position: relative;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.video-container video {
+  width: 100%;
+  border-radius: 8px;
+}
+
+.video-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 1rem;
+  padding: 0.5rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+}
+
+.video-controls button {
+  background: #3a3a3a;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.video-controls button:hover {
+  background: #4a4a4a;
+}
+
+.frame-info {
+  margin-left: auto;
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.timeline {
+  position: relative;
+  margin-top: 1rem;
+}
+
+.timeline-slider {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: #3a3a3a;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.timeline-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4CAF50;
+  cursor: pointer;
+}
+
+.move-marker {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 8px;
+  background: #ff9800;
+}
+
+.move-marker.start {
+  background: #4CAF50;
+}
+
+.move-marker.end {
+  background: #f44336;
+}
+
+.move-selection-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #1a1a1a;
+  border-radius: 8px;
+}
+
+.move-selection-controls button {
+  background: #3a3a3a;
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.move-selection-controls button:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+
+.move-selection-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.move-selection-controls button.active {
+  background: #4CAF50;
+}
+
+.selection-info {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+/* Moves List */
+.moves-list {
+  background: #2a2a2a;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem;
+}
+
+.moves-list h3 {
+  color: #4CAF50;
+  margin-bottom: 1rem;
+}
+
+/* Define Mode Layout */
+.define-mode {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.main-area {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* Responsive */
+@media (min-width: 1024px) {
+  .define-mode {
+    grid-template-columns: 3fr 1fr;
+  }
+}
