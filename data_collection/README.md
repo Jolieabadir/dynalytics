@@ -19,11 +19,13 @@ This UI allows you to:
 - Keyboard shortcuts (←/→, Space, [, ])
 - Timeline with move markers
 - Backend API connection
+- MovesList- Display completed moves
+- MoveForm - Two-step form with contextual questions per move type
+- TaggingMode - Cropped video with frame tagging (P/I/W shortcuts)
 
-### To Build
-- **MovesList** - Display completed moves
-- **MoveForm** - Two-step form with contextual questions per move type
-- **TaggingMode** - Cropped video with frame tagging (P/I/W shortcuts)
+### To build
+- **Undo/Redo** - For tagging actions
+- **skeleton diagram accuracy** - Improve pose overlay precision
 - **Export** - Download labeled CSV
 
 ### Setup
@@ -508,14 +510,6 @@ To add a new move type:
 ### Adding New Tag Types
 Edit keyboard shortcuts in `src/components/VideoPlayer.jsx`:
 
-```javascript
-const handleKeyPress = (e) => {
-  if (e.key === 'p') openTagPopup('pain');
-  if (e.key === 'i') openTagPopup('instability');
-  if (e.key === 'w') openTagPopup('weakness');
-  // Add new shortcuts here
-};
-```
 
 ### Customizing Body Part Locations
 Edit the locations list in `src/components/FrameTagPopup.jsx`:

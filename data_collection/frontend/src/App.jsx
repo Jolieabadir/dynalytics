@@ -5,7 +5,7 @@
  * 1. Define mode - Create moves, mark boundaries
  * 2. Tagging mode - Add frame tags within a move
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import useStore from './store/useStore';
 import { getConfig } from './api/client';
 import VideoUpload from './components/VideoUpload';
@@ -13,6 +13,8 @@ import VideoPlayer from './components/VideoPlayer';
 import MovesList from './components/MovesList';
 import MoveForm from './components/MoveForm';
 import TaggingMode from './components/TaggingMode';
+import ThankYouModal from './components/ThankYouModal';
+import DoneButton from './components/DoneButton';
 import './App.css';
 
 function App() {
@@ -60,6 +62,7 @@ function App() {
  */
 function DefineMode() {
   const { currentVideo } = useStore();
+  const [showThankYou, setShowThankYou] = useState(false);
 
   if (!currentVideo) {
     return <VideoUpload />;
@@ -67,11 +70,15 @@ function DefineMode() {
 
   return (
     <div className="define-mode">
+      <div className="define-header">
+        <DoneButton onClick={() => setShowThankYou(true)} />
+      </div>
       <div className="main-area">
         <VideoPlayer />
         <MovesList />
       </div>
       <MoveForm />
+      <ThankYouModal show={showThankYou} onClose={() => setShowThankYou(false)} />
     </div>
   );
 }

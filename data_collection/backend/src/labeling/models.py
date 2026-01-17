@@ -265,9 +265,13 @@ BODY_PARTS = [
 
 # Tag types
 TAG_TYPES = {
-    'pain': 'Pain',
-    'instability': 'Instability',
-    'weakness': 'Weakness/Fatigue',
-    'technique': 'Good Technique',
-    'slip': 'Foot Slip'
+    'sharp_pain': 'Sharp Pain',
+    'dull_pain': 'Dull Pain',
+    'pop': 'Pop',
+    'unstable': 'Unstable',
+    'stretch_awkward': 'Stretch/Awkward',
+    'strong_controlled': 'Strong/Controlled',
+    'weak': 'Weak',
+    'pumped': 'Pumped',
+    'fatigue': 'Fatigue',
 }
