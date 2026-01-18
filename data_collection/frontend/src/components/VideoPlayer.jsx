@@ -150,36 +150,39 @@ function VideoPlayer() {
   return (
     <div className="video-player">
       <div className="video-container">
-        <video
-          ref={videoRef}
-          src={`http://localhost:8000/videos/${currentVideo.filename}`}
-          onLoadedMetadata={handleLoadedMetadata}
-        />
-        
-        {showSkeleton && csvData && (
-          <SkeletonOverlay
-            videoRef={videoRef}
-            currentFrame={currentFrame}
-            csvData={csvData}
+        {/* Wrapper keeps video and canvas aligned */}
+        <div className="video-wrapper">
+          <video
+            ref={videoRef}
+            src={`http://localhost:8000/videos/${currentVideo.filename}`}
+            onLoadedMetadata={handleLoadedMetadata}
           />
-        )}
+          
+          {showSkeleton && csvData && (
+            <SkeletonOverlay
+              videoRef={videoRef}
+              currentFrame={currentFrame}
+              csvData={csvData}
+            />
+          )}
+        </div>
       </div>
 
       <div className="video-controls">
         <button onClick={() => seekToFrame(currentFrame - 10)}>⏮ -10</button>
         <button onClick={() => seekToFrame(currentFrame - 1)}>◀</button>
-        <button onClick={togglePlay}>{isPlaying ? '⏸' : '▶'}</button>
+        <button onClick={togglePlay} className="play-btn">{isPlaying ? '⏸' : '▶'}</button>
         <button onClick={() => seekToFrame(currentFrame + 1)}>▶▶</button>
         <button onClick={() => seekToFrame(currentFrame + 10)}>+10 ⏭</button>
 
-        <div className="frame-info">
+        <span className="frame-counter">
           Frame: {currentFrame} / {currentVideo.total_frames}
           {' '}({(currentFrame / fps).toFixed(2)}s)
-        </div>
+        </span>
 
         <button 
           onClick={() => setShowSkeleton(!showSkeleton)}
-          className={`skeleton-toggle ${showSkeleton ? 'active' : ''}`}
+          className={`toggle-skeleton ${showSkeleton ? 'active' : ''}`}
           title="Toggle skeleton (S key)"
         >
           {showSkeleton ? '👁️ Hide' : '👁️ Show'} Skeleton
