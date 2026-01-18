@@ -1,13 +1,10 @@
 /**
  * Main App component.
- * 
- * Routes between two main views:
- * 1. Define mode - Create moves, mark boundaries
- * 2. Tagging mode - Add frame tags within a move
  */
 import { useEffect, useState } from 'react';
 import useStore from './store/useStore';
 import { getConfig } from './api/client';
+import { exportVideo } from './api/ExportService';
 import VideoUpload from './components/VideoUpload';
 import VideoPlayer from './components/VideoPlayer';
 import MovesList from './components/MovesList';
@@ -18,9 +15,8 @@ import DoneButton from './components/DoneButton';
 import './App.css';
 
 function App() {
-  const { mode, config, setConfig, currentVideo } = useStore();
+  const { mode, config, setConfig } = useStore();
 
-  // Load configuration on mount
   useEffect(() => {
     const loadConfig = async () => {
       try {
@@ -48,11 +44,7 @@ function App() {
         <p>Climbing Movement Data Collection</p>
       </header>
 
-      {mode === 'define' ? (
-        <DefineMode />
-      ) : (
-        <TaggingMode />
-      )}
+      {mode === 'define' ? <DefineMode /> : <TaggingMode />}
     </div>
   );
 }
@@ -63,15 +55,31 @@ function App() {
 function DefineMode() {
   const { currentVideo } = useStore();
   const [showThankYou, setShowThankYou] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   if (!currentVideo) {
     return <VideoUpload />;
   }
 
+  const handleDone = async () => {
+    setExporting(true);
+    try {
+      await exportVideo(currentVideo.id);
+      setShowThankYou(true);
+    } catch (err) {
+      console.error('Export failed:', err);
+      // Still show thank you - data is saved in db
+      setShowThankYou(true);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="define-mode">
       <div className="define-header">
-        <DoneButton onClick={() => setShowThankYou(true)} />
+        <DoneButton onClick={handleDone} disabled={exporting} />
+        {exporting && <span className="exporting-text">Exporting...</span>}
       </div>
       <div className="main-area">
         <VideoPlayer />

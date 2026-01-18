@@ -20,6 +20,7 @@ from ..labeling.models import (
     Video, Move, FrameTag,
     MOVE_TYPES, MOVE_TYPE_QUESTIONS, BODY_PARTS, TAG_TYPES
 )
+from ..labeling.exporter import Exporter
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -40,6 +41,9 @@ app.add_middleware(
 # Initialize database
 db = Database('data/labels.db')
 db.init()
+
+# Initialize exporter
+exporter = Exporter(db)
 
 # Ensure directories exist
 Path('videos').mkdir(exist_ok=True)
@@ -147,6 +151,12 @@ class ConfigResponse(BaseModel):
     tag_types: dict
 
 
+class ExportResponse(BaseModel):
+    """Schema for export response."""
+    path: str
+    video_deleted: bool
+
+
 # ==================== HELPER FUNCTIONS ====================
 
 def process_video(video_path: Path) -> dict:
@@ -172,7 +182,7 @@ def process_video(video_path: Path) -> dict:
         [sys.executable, '../../main.py', str(video_path), '--output', str(csv_path), '--landmarks'],
         capture_output=True,
         text=True
-)
+    )
     
     if result.returncode != 0:
         raise RuntimeError(f"Pose extraction failed: {result.stderr}")
@@ -280,7 +290,7 @@ async def upload_video(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     
     try:
-    # Process video (extract poses)
+        # Process video (extract poses)
         print(f"DEBUG: About to process video: {video_path}")
         metadata = process_video(video_path)
         print(f"DEBUG: Processing complete: {metadata}")
@@ -347,6 +357,49 @@ async def get_video_csv(video_id: int):
         )
     
     return FileResponse(csv_path, media_type='text/csv', filename=csv_path.name)
+
+
+@app.post("/api/videos/{video_id}/export", response_model=ExportResponse)
+async def export_video_endpoint(video_id: int, delete_video: bool = False):
+    """
+    Export labeled data for a video.
+    
+    Combines pose data with move/tag labels into a single CSV.
+    Optionally deletes the video file after export to save storage.
+    
+    Query params:
+        delete_video: If true, delete the video file after successful export
+    """
+    try:
+        export_path = exporter.export_video(video_id, delete_video=delete_video)
+        return ExportResponse(path=export_path, video_deleted=delete_video)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+
+
+@app.get("/api/videos/{video_id}/export/download")
+async def download_export(video_id: int):
+    """Download the exported labeled CSV file."""
+    video = db.get_video(video_id)
+    if not video:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Video {video_id} not found"
+        )
+    
+    raw_csv_path = Path(video.csv_path)
+    export_path = Path('data/exports') / f"{raw_csv_path.stem}_labeled.csv"
+    
+    if not export_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Export not found. Run export first."
+        )
+    
+    return FileResponse(export_path, media_type='text/csv', filename=export_path.name)
 
 
 # ==================== MOVE ENDPOINTS ====================

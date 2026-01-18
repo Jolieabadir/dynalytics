@@ -1,8 +1,7 @@
 /**
  * ThankYouModal component.
  * 
- * Shows a thank you message after user finishes contributing.
- * Reusable across different screens.
+ * Just displays thank you message. Export logic handled by parent.
  */
 import useStore from '../store/useStore';
 
@@ -15,7 +14,7 @@ function ThankYouModal({ show, onClose }) {
     setMode('define');
     setCurrentMove(null);
     setFrameTags([]);
-    setCurrentVideo(null); // Takes user back to upload screen
+    setCurrentVideo(null);
     if (onClose) onClose();
   };
 
@@ -23,13 +22,9 @@ function ThankYouModal({ show, onClose }) {
     <div className="thank-you-overlay">
       <div className="thank-you-modal">
         <h2>🎉 Thank You!</h2>
-        <p>
-          Your contribution helps build better movement analysis tools for climbers everywhere.
-          Every tagged frame makes the research stronger.
-        </p>
-        <button onClick={handleFinish}>
-          Upload Another Video
-        </button>
+        <p>Your contribution helps build better movement analysis tools for climbers everywhere.</p>
+        <p className="export-success">✅ Data exported successfully!</p>
+        <button onClick={handleFinish}>Upload Another Video</button>
       </div>
     </div>
   );

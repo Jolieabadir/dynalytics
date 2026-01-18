@@ -50,6 +50,37 @@ export const getVideoCSV = async (videoId) => {
   return response.data;
 };
 
+/**
+ * Export labeled data for a video.
+ * @param {number} videoId - The video ID to export
+ * @param {boolean} deleteVideo - If true, delete the video file after export
+ * @returns {Promise<{path: string, video_deleted: boolean}>}
+ */
+export const exportVideo = async (videoId, deleteVideo = true) => {
+  const response = await api.post(`/api/videos/${videoId}/export?delete_video=${deleteVideo}`);
+  return response.data;
+};
+
+/**
+ * Download the exported CSV file.
+ * @param {number} videoId - The video ID
+ */
+export const downloadExport = async (videoId) => {
+  const response = await api.get(`/api/videos/${videoId}/export/download`, {
+    responseType: 'blob',
+  });
+  
+  // Create download link
+  const url = window.URL.createObjectURL(new Blob([response.data]));
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', `video_${videoId}_labeled.csv`);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+};
+
 // ==================== MOVES ====================
 
 export const createMove = async (moveData) => {

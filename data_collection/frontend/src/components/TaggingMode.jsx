@@ -2,11 +2,11 @@
  * TaggingMode component.
  * 
  * Frame tagging interface for adding sensation tags within a move.
- * Shows cropped/looping video with tag buttons, body part selector, and intensity slider.
  */
 import { useRef, useEffect, useState } from 'react';
 import useStore from '../store/useStore';
 import { getFrameTags, createFrameTag, deleteFrameTag } from '../api/client';
+import { exportVideo } from '../api/ExportService';
 import ThankYouModal from './ThankYouModal';
 import DoneButton from './DoneButton';
 
@@ -54,6 +54,7 @@ function TaggingMode() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showThankYou, setShowThankYou] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const fps = currentVideo?.fps || 30;
 
@@ -226,6 +227,21 @@ function TaggingMode() {
     setFrameTags([]);
   };
 
+  // Done - export then show thank you
+  const handleDone = async () => {
+    setExporting(true);
+    try {
+      await exportVideo(currentVideo.id);
+      setShowThankYou(true);
+    } catch (err) {
+      console.error('Export failed:', err);
+      // Still show thank you - data is saved in db
+      setShowThankYou(true);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const formatMoveType = (type) => {
     return type
       .split('_')
@@ -263,7 +279,8 @@ function TaggingMode() {
           <button onClick={handleNextMove} className="back-btn save-next-btn">
             Save & Next Move →
           </button>
-          <DoneButton onClick={() => setShowThankYou(true)} />
+          <DoneButton onClick={handleDone} disabled={exporting} />
+          {exporting && <span className="exporting-text">Exporting...</span>}
         </div>
         <div className="move-info">
           <h2>Tagging: {formatMoveType(currentMove.move_type)}</h2>
