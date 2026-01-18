@@ -1,6 +1,8 @@
 # Dynalytics
 
 AI-powered movement analysis for climbing injury prevention and rehabilitation.
+## Website
+https://www.dynalytics.org/
 
 Dynalytics uses computer vision to analyze climbing movement patterns from video, identifying injury risk through joint angle and velocity analysis. The goal is to catch dangerous movement patterns before they lead to pain or injury.
 
