@@ -86,6 +86,7 @@ class Database:
                     form_quality INTEGER NOT NULL,
                     effort_level INTEGER NOT NULL,
                     contextual_data TEXT NOT NULL,
+                    technique_modifiers TEXT NOT NULL DEFAULT '[]',
                     tags TEXT NOT NULL,
                     description TEXT NOT NULL,
                     labeled_at TEXT NOT NULL,
@@ -112,6 +113,21 @@ class Database:
             # Create indexes
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_moves_video ON moves(video_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_frame_tags_move ON frame_tags(move_id)')
+            
+            # Migration: Add technique_modifiers column if it doesn't exist
+            self._migrate_add_technique_modifiers(cursor)
+    
+    def _migrate_add_technique_modifiers(self, cursor):
+        """Add technique_modifiers column to existing moves table if missing."""
+        # Check if column exists
+        cursor.execute("PRAGMA table_info(moves)")
+        columns = [row['name'] for row in cursor.fetchall()]
+        
+        if 'technique_modifiers' not in columns:
+            cursor.execute('''
+                ALTER TABLE moves ADD COLUMN technique_modifiers TEXT NOT NULL DEFAULT '[]'
+            ''')
+            print("Migration: Added technique_modifiers column to moves table")
     
     # ==================== VIDEO OPERATIONS ====================
     
@@ -184,9 +200,10 @@ class Database:
             cursor.execute('''
                 INSERT INTO moves (
                     video_id, frame_start, frame_end, timestamp_start_ms, timestamp_end_ms,
-                    move_type, form_quality, effort_level, contextual_data, tags, description, labeled_at
+                    move_type, form_quality, effort_level, contextual_data, technique_modifiers,
+                    tags, description, labeled_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 move.video_id,
                 move.frame_start,
@@ -197,6 +214,7 @@ class Database:
                 move.form_quality,
                 move.effort_level,
                 json.dumps(move.contextual_data),
+                json.dumps(move.technique_modifiers),
                 json.dumps(move.tags),
                 move.description,
                 (move.labeled_at or datetime.now()).isoformat()
@@ -243,6 +261,7 @@ class Database:
                     form_quality = ?,
                     effort_level = ?,
                     contextual_data = ?,
+                    technique_modifiers = ?,
                     tags = ?,
                     description = ?
                 WHERE id = ?
@@ -255,6 +274,7 @@ class Database:
                 move.form_quality,
                 move.effort_level,
                 json.dumps(move.contextual_data),
+                json.dumps(move.technique_modifiers),
                 json.dumps(move.tags),
                 move.description,
                 move.id
@@ -331,6 +351,11 @@ class Database:
     
     def _row_to_move(self, row: sqlite3.Row) -> Move:
         """Convert database row to Move object."""
+        # Handle technique_modifiers - may not exist in old rows
+        technique_modifiers = []
+        if 'technique_modifiers' in row.keys():
+            technique_modifiers = json.loads(row['technique_modifiers'])
+        
         return Move(
             id=row['id'],
             video_id=row['video_id'],
@@ -342,6 +367,7 @@ class Database:
             form_quality=row['form_quality'],
             effort_level=row['effort_level'],
             contextual_data=json.loads(row['contextual_data']),
+            technique_modifiers=technique_modifiers,
             tags=json.loads(row['tags']),
             description=row['description'],
             labeled_at=datetime.fromisoformat(row['labeled_at'])

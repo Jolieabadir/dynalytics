@@ -3,7 +3,7 @@
  * 
  * Two-step form for creating/editing moves:
  * 1. Select move type
- * 2. Contextual questions + quality/effort/tags
+ * 2. Contextual questions + technique modifiers + quality/effort/tags
  */
 import { useState, useEffect } from 'react';
 import useStore from '../store/useStore';
@@ -26,6 +26,7 @@ function MoveForm() {
   // Form state
   const [moveType, setMoveType] = useState('');
   const [contextualData, setContextualData] = useState({});
+  const [techniqueModifiers, setTechniqueModifiers] = useState([]);
   const [formQuality, setFormQuality] = useState(3);
   const [effortLevel, setEffortLevel] = useState(5);
   const [tags, setTags] = useState([]);
@@ -55,6 +56,7 @@ function MoveForm() {
       setStep(1);
       setMoveType('');
       setContextualData({});
+      setTechniqueModifiers([]);
       setFormQuality(3);
       setEffortLevel(5);
       setTags([]);
@@ -96,6 +98,14 @@ function MoveForm() {
     handleContextualChange(field, updated);
   };
 
+  const toggleTechniqueModifier = (modifierId) => {
+    setTechniqueModifiers(prev =>
+      prev.includes(modifierId)
+        ? prev.filter(m => m !== modifierId)
+        : [...prev, modifierId]
+    );
+  };
+
   const toggleTag = (tag) => {
     setTags(prev =>
       prev.includes(tag)
@@ -125,6 +135,7 @@ function MoveForm() {
         form_quality: formQuality,
         effort_level: effortLevel,
         contextual_data: contextualData,
+        technique_modifiers: techniqueModifiers,
         tags: tags,
         description: description,
       };
@@ -179,6 +190,9 @@ function MoveForm() {
               contextualData={contextualData}
               onContextualChange={handleContextualChange}
               onMultiSelectToggle={handleMultiSelectToggle}
+              techniqueModifiers={techniqueModifiers}
+              availableModifiers={config.technique_modifiers || []}
+              toggleTechniqueModifier={toggleTechniqueModifier}
               formQuality={formQuality}
               setFormQuality={setFormQuality}
               effortLevel={effortLevel}
@@ -249,13 +263,16 @@ function Step1SelectType({ moveTypes, moveType, setMoveType, moveStart, moveEnd,
   );
 }
 
-// Step 2: Contextual questions + quality/effort/tags
+// Step 2: Contextual questions + technique modifiers + quality/effort/tags
 function Step2Details({
   moveType,
   questions,
   contextualData,
   onContextualChange,
   onMultiSelectToggle,
+  techniqueModifiers,
+  availableModifiers,
+  toggleTechniqueModifier,
   formQuality,
   setFormQuality,
   effortLevel,
@@ -282,7 +299,7 @@ function Step2Details({
           <label className="form-label">{fieldConfig.question}</label>
           
           {fieldConfig.multi_select ? (
-            // Multi-select checkboxes
+            // Multi-select: checkboxes
             <div className="checkbox-group">
               {fieldConfig.options.map(option => (
                 <label key={option} className="checkbox-label">
@@ -296,7 +313,7 @@ function Step2Details({
               ))}
             </div>
           ) : (
-            // Radio buttons
+            // Single select: radio buttons
             <div className="radio-group">
               {fieldConfig.options.map(option => (
                 <label key={option} className="radio-label">
@@ -305,7 +322,7 @@ function Step2Details({
                     name={fieldKey}
                     value={option}
                     checked={contextualData[fieldKey] === option}
-                    onChange={(e) => onContextualChange(fieldKey, e.target.value)}
+                    onChange={() => onContextualChange(fieldKey, option)}
                   />
                   {formatOption(option)}
                 </label>
@@ -315,52 +332,72 @@ function Step2Details({
         </div>
       ))}
 
+      {/* Technique Modifiers - applicable to ALL move types */}
+      {availableModifiers && availableModifiers.length > 0 && (
+        <div className="form-field">
+          <label className="form-label">Technique Modifiers (optional)</label>
+          <div className="tags-group">
+            {availableModifiers.map(modifier => (
+              <button
+                key={modifier.id}
+                type="button"
+                onClick={() => toggleTechniqueModifier(modifier.id)}
+                className={`tag-btn ${techniqueModifiers.includes(modifier.id) ? 'active' : ''}`}
+                title={modifier.description}
+              >
+                {modifier.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Form Quality */}
       <div className="form-field">
         <label className="form-label">Form Quality</label>
         <div className="quality-buttons">
-          {[1, 2, 3, 4, 5].map(level => (
+          {[1, 2, 3, 4, 5].map(q => (
             <button
-              key={level}
-              onClick={() => setFormQuality(level)}
-              className={`quality-btn ${formQuality === level ? 'active' : ''}`}
+              key={q}
+              type="button"
+              onClick={() => setFormQuality(q)}
+              className={`quality-btn ${formQuality === q ? 'active' : ''}`}
             >
-              {level}
+              {q}
             </button>
           ))}
         </div>
         <div className="quality-labels">
           <span>Poor</span>
-          <span>Excellent</span>
+          <span>Perfect</span>
         </div>
       </div>
 
       {/* Effort Level */}
       <div className="form-field">
-        <label className="form-label">
-          Overall Effort Level: {effortLevel}/10
-        </label>
+        <label className="form-label">Effort Level: {effortLevel}/10</label>
         <input
           type="range"
           min="0"
           max="10"
           value={effortLevel}
-          onChange={(e) => setEffortLevel(parseInt(e.target.value))}
+          onChange={(e) => setEffortLevel(Number(e.target.value))}
           className="effort-slider"
         />
         <div className="effort-labels">
           <span>Easy</span>
-          <span>Maximal</span>
+          <span>Max Effort</span>
         </div>
       </div>
 
-      {/* Quick Tags */}
+      {/* Tags */}
       <div className="form-field">
-        <label className="form-label">Quick Tags</label>
+        <label className="form-label">Tags (optional)</label>
         <div className="tags-group">
           {commonTags.map(tag => (
             <button
               key={tag}
+              type="button"
               onClick={() => toggleTag(tag)}
               className={`tag-btn ${tags.includes(tag) ? 'active' : ''}`}
             >
@@ -372,15 +409,13 @@ function Step2Details({
 
       {/* Description */}
       <div className="form-field">
-        <label className="form-label">
-          Description (optional, 500 chars max)
-        </label>
+        <label className="form-label">Description (optional)</label>
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value.slice(0, 500))}
           placeholder="Add notes about this move..."
           className="description-textarea"
-          rows="4"
+          rows="3"
         />
         <div className="char-count">{description.length}/500</div>
       </div>

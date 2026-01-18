@@ -41,6 +41,7 @@ class Exporter:
                     'move_type': move.move_type,
                     'form_quality': move.form_quality,
                     'effort_level': move.effort_level,
+                    'technique_modifiers': ','.join(move.technique_modifiers) if move.technique_modifiers else '',
                     'tags': [],
                 }
             # Add frame tags
@@ -69,9 +70,9 @@ class Exporter:
         with open(raw_csv_path, 'r') as infile, open(export_path, 'w', newline='') as outfile:
             reader = csv.DictReader(infile)
             
-            # New fieldnames
+            # New fieldnames - added technique_modifiers
             fieldnames = list(reader.fieldnames) + [
-                'move_id', 'move_type', 'form_quality', 'effort_level',
+                'move_id', 'move_type', 'form_quality', 'effort_level', 'technique_modifiers',
                 'tag_type', 'tag_level', 'tag_locations', 'tag_note'
             ]
             
@@ -87,6 +88,7 @@ class Exporter:
                 row['move_type'] = labels.get('move_type', '')
                 row['form_quality'] = labels.get('form_quality', '')
                 row['effort_level'] = labels.get('effort_level', '')
+                row['technique_modifiers'] = labels.get('technique_modifiers', '')
                 
                 # Add first tag (if any)
                 tags = labels.get('tags', [])

@@ -23,10 +23,10 @@ const TAG_TYPES = [
   { id: 'fatigue', label: 'Fatigue', color: '#92400e', emoji: '🟤' },
 ];
 
-// Body parts list
+// Body parts list - removed Finger (not tracked by MediaPipe)
 const BODY_PARTS = [
-  { group: 'Left Side', parts: ['Left Shoulder', 'Left Elbow', 'Left Wrist', 'Left Finger', 'Left Hip', 'Left Knee', 'Left Ankle'] },
-  { group: 'Right Side', parts: ['Right Shoulder', 'Right Elbow', 'Right Wrist', 'Right Finger', 'Right Hip', 'Right Knee', 'Right Ankle'] },
+  { group: 'Left Side', parts: ['Left Shoulder', 'Left Elbow', 'Left Wrist', 'Left Hip', 'Left Knee', 'Left Ankle'] },
+  { group: 'Right Side', parts: ['Right Shoulder', 'Right Elbow', 'Right Wrist', 'Right Hip', 'Right Knee', 'Right Ankle'] },
   { group: 'Core/Back', parts: ['Lower Back', 'Upper Back', 'Core', 'Neck'] },
 ];
 
@@ -88,57 +88,36 @@ function TaggingMode() {
     if (!videoRef.current) return;
 
     const updateFrame = () => {
-      const frame = Math.floor(videoRef.current.currentTime * fps);
-      setCurrentFrame(frame);
+      const time = videoRef.current.currentTime;
+      const frame = Math.round(time * fps);
       
-      // Loop within move boundaries
-      if (currentMove && frame >= currentMove.frame_end) {
-        const startTime = currentMove.frame_start / fps;
-        videoRef.current.currentTime = startTime;
+      // Clamp to move boundaries
+      if (currentMove) {
+        const clampedFrame = Math.max(
+          currentMove.frame_start,
+          Math.min(frame, currentMove.frame_end)
+        );
+        
+        // If we've gone past the end, loop back
+        if (frame > currentMove.frame_end) {
+          videoRef.current.currentTime = currentMove.frame_start / fps;
+        }
+        
+        setCurrentFrame(clampedFrame);
       }
     };
 
     const video = videoRef.current;
     video.addEventListener('timeupdate', updateFrame);
     
-    return () => video.removeEventListener('timeupdate', updateFrame);
-  }, [fps, currentMove, setCurrentFrame]);
-
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKeyPress = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-      switch (e.key) {
-        case 'ArrowLeft':
-          e.preventDefault();
-          seekToFrame(currentFrame - 1);
-          break;
-        case 'ArrowRight':
-          e.preventDefault();
-          seekToFrame(currentFrame + 1);
-          break;
-        case ' ':
-          e.preventDefault();
-          togglePlay();
-          break;
-        case 'Escape':
-          if (showTagForm) {
-            setShowTagForm(false);
-            setSelectedTagType(null);
-          }
-          break;
-      }
+    return () => {
+      video.removeEventListener('timeupdate', updateFrame);
     };
-
-    window.addEventListener('keydown', handleKeyPress);
-    return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [currentFrame, showTagForm]);
+  }, [fps, currentMove, setCurrentFrame]);
 
   const seekToFrame = (frame) => {
     if (!videoRef.current || !currentMove) return;
     
-    // Clamp to move boundaries
     const clampedFrame = Math.max(currentMove.frame_start, Math.min(frame, currentMove.frame_end));
     const time = clampedFrame / fps;
     videoRef.current.currentTime = time;
@@ -231,7 +210,7 @@ function TaggingMode() {
   const handleDone = async () => {
     setExporting(true);
     try {
-      await exportVideo(currentVideo.id);
+      await exportVideo(currentVideo.id, true);  // true = delete video after export
       setShowThankYou(true);
     } catch (err) {
       console.error('Export failed:', err);
@@ -308,18 +287,18 @@ function TaggingMode() {
             <button onClick={togglePlay} className="play-btn">
               {isPlaying ? '⏸' : '▶'}
             </button>
-            <button onClick={() => seekToFrame(currentFrame + 1)}>▶▶</button>
+            <button onClick={() => seekToFrame(currentFrame + 1)}>▶</button>
             <button onClick={() => seekToFrame(currentFrame + 10)}>+10 ⏭</button>
           </div>
 
           {/* Frame Info */}
           <div className="frame-info">
             <span>Frame: {currentFrame}</span>
-            <span>Move Frame: {currentMoveFrame + 1} / {moveFrameCount}</span>
+            <span>Move Frame: {currentMoveFrame} / {moveFrameCount}</span>
             <span>({(currentFrame / fps).toFixed(2)}s)</span>
           </div>
 
-          {/* Timeline */}
+          {/* Timeline with tag markers */}
           <div className="tagging-timeline">
             <input
               type="range"
@@ -329,48 +308,48 @@ function TaggingMode() {
               onChange={(e) => seekToFrame(parseInt(e.target.value))}
               className="timeline-slider"
             />
-            
-            {/* Tag markers on timeline */}
-            {frameTags.map((tag) => (
-              <div
-                key={tag.id}
-                className="tag-marker"
-                style={{
-                  left: `${((tag.frame_number - currentMove.frame_start) / moveFrameCount) * 100}%`,
-                  backgroundColor: getTagColor(tag.tag_type),
-                }}
-                title={`${getTagLabel(tag.tag_type)} - Frame ${tag.frame_number}`}
-              />
-            ))}
+            {/* Tag markers */}
+            {frameTags.map((tag) => {
+              const position = ((tag.frame_number - currentMove.frame_start) / moveFrameCount) * 100;
+              return (
+                <div
+                  key={tag.id}
+                  className="tag-marker"
+                  style={{
+                    left: `${position}%`,
+                    backgroundColor: getTagColor(tag.tag_type),
+                  }}
+                  title={`${getTagLabel(tag.tag_type)} @ frame ${tag.frame_number}`}
+                />
+              );
+            })}
           </div>
         </div>
 
-        {/* Tag Buttons Section */}
+        {/* Tag Controls Section */}
         <div className="tagging-controls-section">
           <h3>Add Tag at Frame {currentFrame}</h3>
-          
+
+          {/* Tag Type Buttons */}
           <div className="tag-buttons-grid">
-            {TAG_TYPES.map((tagType) => (
+            {TAG_TYPES.map((tag) => (
               <button
-                key={tagType.id}
-                onClick={() => handleTagButtonClick(tagType)}
-                className={`tag-button ${selectedTagType?.id === tagType.id ? 'selected' : ''}`}
-                style={{ 
-                  '--tag-color': tagType.color,
-                  borderColor: tagType.color,
-                }}
+                key={tag.id}
+                className={`tag-button ${selectedTagType?.id === tag.id ? 'selected' : ''}`}
+                style={{ '--tag-color': tag.color }}
+                onClick={() => handleTagButtonClick(tag)}
               >
-                <span className="tag-emoji">{tagType.emoji}</span>
-                <span className="tag-label">{tagType.label}</span>
+                <span className="tag-emoji">{tag.emoji}</span>
+                <span className="tag-label">{tag.label}</span>
               </button>
             ))}
           </div>
 
-          {/* Tag Form (appears when tag button clicked) */}
+          {/* Tag Form (appears when tag type selected) */}
           {showTagForm && selectedTagType && (
             <div className="tag-form">
               <div className="tag-form-header">
-                <span 
+                <span
                   className="selected-tag-badge"
                   style={{ backgroundColor: selectedTagType.color }}
                 >
@@ -379,9 +358,9 @@ function TaggingMode() {
                 <span className="at-frame">at Frame {currentFrame}</span>
               </div>
 
-              {/* Body Part Selector */}
+              {/* Body Part Select */}
               <div className="form-group">
-                <label>Body Part *</label>
+                <label>Body Part</label>
                 <select
                   value={selectedBodyPart}
                   onChange={(e) => setSelectedBodyPart(e.target.value)}
@@ -462,7 +441,7 @@ function TaggingMode() {
               <div className="tags-list">
                 {frameTags.map((tag) => (
                   <div key={tag.id} className="tag-item">
-                    <div 
+                    <div
                       className="tag-color-dot"
                       style={{ backgroundColor: getTagColor(tag.tag_type) }}
                     />
@@ -473,13 +452,13 @@ function TaggingMode() {
                       </div>
                       <div className="tag-meta">
                         <span>{tag.locations?.join(', ')}</span>
-                        <span className="tag-level">{tag.level}/10</span>
+                        <span className="tag-level">Level: {tag.level}/10</span>
                       </div>
                       {tag.note && <div className="tag-note">{tag.note}</div>}
                     </div>
                     <button
-                      onClick={() => handleDeleteTag(tag.id)}
                       className="delete-tag-btn"
+                      onClick={() => handleDeleteTag(tag.id)}
                       title="Delete tag"
                     >
                       ✕
@@ -492,7 +471,6 @@ function TaggingMode() {
         </div>
       </div>
 
-      {/* Thank You Modal */}
       <ThankYouModal show={showThankYou} onClose={() => setShowThankYou(false)} />
     </div>
   );

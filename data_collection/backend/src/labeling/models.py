@@ -53,13 +53,17 @@ class Move:
     timestamp_end_ms: float = 0.0
     
     # Core move data
-    move_type: str = ""  # 'dyno', 'lock_off', 'static', etc.
+    move_type: str = ""  # 'dyno', 'lock_off', 'bump', 'coordination', etc.
     form_quality: int = 3  # 1-5
     effort_level: int = 5  # 0-10
     
     # Contextual answers (stored as dict - specific to move type)
-    # Example for dyno: {'catching_hand': 'right_hand', 'push_foot': 'left_foot', ...}
+    # Example for dyno: {'catching_hand': 'right_hand', 'dyno_style': 'double_clutch', ...}
     contextual_data: dict = field(default_factory=dict)
+    
+    # Technique modifiers (applicable to ALL moves)
+    # Example: ['drop_knee', 'heel_hook']
+    technique_modifiers: list[str] = field(default_factory=list)
     
     # Tags and description
     tags: list[str] = field(default_factory=list)
@@ -139,19 +143,62 @@ class FrameTag:
         return cls(**data)
 
 
-# Move type configurations
+# =============================================================================
+# MOVE TYPES - Primary move categories
+# Removed: static, campus, flag (flag is a technique modifier)
+# =============================================================================
 MOVE_TYPES = [
-    'static',
     'lock_off',
     'dyno',
     'deadpoint',
+    'bump',
     'mantle',
-    'drop_knee',
+    'coordination',
+    'gaston',
+    'undercling',
 ]
 
-# Contextual questions for each move type
+# =============================================================================
+# TECHNIQUE MODIFIERS - Can be applied to ANY move type
+# These describe HOW the move was executed, not WHAT the move is
+# =============================================================================
+TECHNIQUE_MODIFIERS = [
+    {
+        'id': 'drop_knee',
+        'label': 'Drop Knee',
+        'description': 'Hip turned in with knee dropped'
+    },
+    {
+        'id': 'heel_hook',
+        'label': 'Heel Hook',
+        'description': 'Heel placed on hold for leverage'
+    },
+    {
+        'id': 'toe_hook',
+        'label': 'Toe Hook',
+        'description': 'Top of foot hooked on hold'
+    },
+    {
+        'id': 'smear',
+        'label': 'Smear',
+        'description': 'Foot pressed against wall without hold'
+    },
+    {
+        'id': 'flag',
+        'label': 'Flag',
+        'description': 'Leg extended for balance/counterweight'
+    },
+]
+
+# =============================================================================
+# CONTEXTUAL QUESTIONS - Specific to each move type
+# =============================================================================
 MOVE_TYPE_QUESTIONS = {
     'dyno': {
+        'dyno_style': {
+            'question': 'Dyno style',
+            'options': ['double_clutch', 'paddle_dyno', 'single_arm_catch']
+        },
         'catching_hand': {
             'question': 'Which hand caught the target hold?',
             'options': ['left_hand', 'right_hand', 'both_hands', 'missed']
@@ -166,14 +213,23 @@ MOVE_TYPE_QUESTIONS = {
             'multi_select': True
         },
         'body_position': {
-            'question': 'Body position',
+            'question': 'Body position at launch',
             'options': ['square', 'side_on', 'turned_away']
         }
     },
+    
     'lock_off': {
         'lock_off_arm': {
             'question': 'Which arm was the lock-off on?',
             'options': ['left_arm', 'right_arm', 'both_arms']
+        },
+        'lock_angle': {
+            'question': 'Lock-off angle (elbow bend)',
+            'options': ['full_lock', 'ninety_degrees', 'slight_bend']
+        },
+        'reaching_hand': {
+            'question': 'Which hand reached?',
+            'options': ['left_hand', 'right_hand']
         },
         'contact_points': {
             'question': 'Contact points during lock-off',
@@ -185,40 +241,7 @@ MOVE_TYPE_QUESTIONS = {
             'options': ['<1sec', '1-3sec', '3-5sec', '>5sec']
         }
     },
-    'drop_knee': {
-        'dropped_knee': {
-            'question': 'Which knee dropped?',
-            'options': ['left_knee', 'right_knee']
-        },
-        'hip_rotation': {
-            'question': 'Hip rotation',
-            'options': ['internal', 'external', 'neutral']
-        },
-        'contact_points': {
-            'question': 'Contact points',
-            'options': ['left_hand', 'right_hand', 'left_foot', 'right_foot'],
-            'multi_select': True
-        }
-    },
-    'static': {
-        'reaching_hand': {
-            'question': 'Which hand reached?',
-            'options': ['left_hand', 'right_hand', 'both_hands']
-        },
-        'supporting_leg': {
-            'question': 'Supporting leg',
-            'options': ['left_foot', 'right_foot', 'both_feet']
-        },
-        'other_leg_position': {
-            'question': 'Other leg position',
-            'options': ['on_hold', 'flagged_left', 'flagged_right', 'dangling']
-        },
-        'contact_points': {
-            'question': 'Contact points',
-            'options': ['left_hand', 'right_hand', 'left_foot', 'right_foot'],
-            'multi_select': True
-        }
-    },
+    
     'deadpoint': {
         'reaching_hand': {
             'question': 'Which hand reached?',
@@ -229,11 +252,31 @@ MOVE_TYPE_QUESTIONS = {
             'options': ['left_foot', 'right_foot', 'both_feet']
         },
         'contact_at_peak': {
-            'question': 'Contact at peak',
+            'question': 'Contact at peak (dead point moment)',
             'options': ['left_hand', 'right_hand', 'left_foot', 'right_foot'],
             'multi_select': True
+        },
+        'body_position': {
+            'question': 'Body position',
+            'options': ['square', 'side_on', 'twisted']
         }
     },
+    
+    'bump': {
+        'bumping_hand': {
+            'question': 'Which hand bumped?',
+            'options': ['left_hand', 'right_hand']
+        },
+        'bump_distance': {
+            'question': 'Bump distance',
+            'options': ['short', 'medium', 'long']
+        },
+        'supporting_hand': {
+            'question': 'Other hand position',
+            'options': ['on_hold', 'moving', 'not_in_contact']
+        }
+    },
+    
     'mantle': {
         'mantle_side': {
             'question': 'Which side mantled first?',
@@ -247,8 +290,61 @@ MOVE_TYPE_QUESTIONS = {
             'question': 'Contact points at top',
             'options': ['left_hand', 'right_hand', 'left_knee', 'right_knee'],
             'multi_select': True
+        },
+        'press_type': {
+            'question': 'Press type',
+            'options': ['palm_press', 'finger_press', 'elbow_press']
         }
-    }
+    },
+    
+    'coordination': {
+        'coordination_style': {
+            'question': 'Coordination move style',
+            'options': ['skate_move', 'throw_hook', 'bicycle', 'other']
+        },
+        'primary_limb': {
+            'question': 'Primary moving limb',
+            'options': ['left_hand', 'right_hand', 'left_foot', 'right_foot']
+        },
+        'secondary_limb': {
+            'question': 'Secondary moving limb (if any)',
+            'options': ['left_hand', 'right_hand', 'left_foot', 'right_foot', 'none']
+        },
+        'timing': {
+            'question': 'Movement timing',
+            'options': ['simultaneous', 'sequential', 'alternating']
+        }
+    },
+    
+    'gaston': {
+        'gaston_hand': {
+            'question': 'Which hand is gastoning?',
+            'options': ['left_hand', 'right_hand', 'both_hands']
+        },
+        'elbow_position': {
+            'question': 'Elbow position',
+            'options': ['high', 'level', 'low']
+        },
+        'body_position': {
+            'question': 'Body position relative to hold',
+            'options': ['inside', 'outside', 'directly_below']
+        }
+    },
+    
+    'undercling': {
+        'undercling_hand': {
+            'question': 'Which hand is underclinging?',
+            'options': ['left_hand', 'right_hand', 'both_hands']
+        },
+        'hip_position': {
+            'question': 'Hip position',
+            'options': ['low', 'level', 'high']
+        },
+        'pulling_direction': {
+            'question': 'Pulling direction',
+            'options': ['straight_up', 'diagonal', 'outward']
+        }
+    },
 }
 
 # Body part options for sensation tagging

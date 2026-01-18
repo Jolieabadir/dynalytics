@@ -18,7 +18,7 @@ import subprocess
 from ..labeling.database import Database
 from ..labeling.models import (
     Video, Move, FrameTag,
-    MOVE_TYPES, MOVE_TYPE_QUESTIONS, BODY_PARTS, TAG_TYPES
+    MOVE_TYPES, MOVE_TYPE_QUESTIONS, BODY_PARTS, TAG_TYPES, TECHNIQUE_MODIFIERS
 )
 from ..labeling.exporter import Exporter
 
@@ -83,6 +83,7 @@ class MoveCreate(BaseModel):
     form_quality: int = Field(ge=1, le=5)
     effort_level: int = Field(ge=0, le=10)
     contextual_data: dict = {}
+    technique_modifiers: List[str] = []
     tags: List[str] = []
     description: str = ""
 
@@ -97,6 +98,7 @@ class MoveUpdate(BaseModel):
     form_quality: Optional[int] = Field(None, ge=1, le=5)
     effort_level: Optional[int] = Field(None, ge=0, le=10)
     contextual_data: Optional[dict] = None
+    technique_modifiers: Optional[List[str]] = None
     tags: Optional[List[str]] = None
     description: Optional[str] = None
 
@@ -113,6 +115,7 @@ class MoveResponse(BaseModel):
     form_quality: int
     effort_level: int
     contextual_data: dict
+    technique_modifiers: List[str] = []
     tags: List[str]
     description: str
     labeled_at: str
@@ -147,6 +150,7 @@ class ConfigResponse(BaseModel):
     """Schema for configuration data."""
     move_types: List[str]
     move_type_questions: dict
+    technique_modifiers: List[dict]
     body_parts: List[str]
     tag_types: dict
 
@@ -165,6 +169,8 @@ def process_video(video_path: Path) -> dict:
     Returns video metadata.
     """
     import cv2
+    
+    print(f"DEBUG: About to process video: {video_path}")
     
     # Get video metadata
     cap = cv2.VideoCapture(str(video_path))
@@ -187,12 +193,16 @@ def process_video(video_path: Path) -> dict:
     if result.returncode != 0:
         raise RuntimeError(f"Pose extraction failed: {result.stderr}")
     
-    return {
+    metadata = {
         'fps': fps,
         'total_frames': total_frames,
         'duration_ms': duration_ms,
         'csv_path': str(csv_path)
     }
+    
+    print(f"DEBUG: Processing complete: {metadata}")
+    
+    return metadata
 
 
 def video_to_response(video: Video) -> VideoResponse:
@@ -225,6 +235,7 @@ def move_to_response(move: Move) -> MoveResponse:
         form_quality=move.form_quality,
         effort_level=move.effort_level,
         contextual_data=move.contextual_data,
+        technique_modifiers=move.technique_modifiers,
         tags=move.tags,
         description=move.description,
         labeled_at=move.labeled_at.isoformat() if move.labeled_at else "",
@@ -261,6 +272,7 @@ async def get_config():
     return ConfigResponse(
         move_types=MOVE_TYPES,
         move_type_questions=MOVE_TYPE_QUESTIONS,
+        technique_modifiers=TECHNIQUE_MODIFIERS,
         body_parts=BODY_PARTS,
         tag_types=TAG_TYPES
     )
@@ -281,43 +293,50 @@ async def upload_video(file: UploadFile = File(...)):
     if not file.filename.endswith(('.mov', '.mp4', '.avi')):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type. Must be .mov, .mp4, or .avi"
+            detail="Invalid file type. Please upload .mov, .mp4, or .avi"
         )
     
-    # Save uploaded file
-    video_path = Path('videos') / file.filename
-    with video_path.open('wb') as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Generate unique filename to avoid collisions
+    import uuid
+    unique_id = uuid.uuid4().hex
+    safe_filename = f"video_{unique_id}_{file.filename}"
+    video_path = Path('videos') / safe_filename
     
+    # Save file
     try:
-        # Process video (extract poses)
-        print(f"DEBUG: About to process video: {video_path}")
-        metadata = process_video(video_path)
-        print(f"DEBUG: Processing complete: {metadata}")
-        
-        # Create video record
-        video = Video(
-            filename=file.filename,
-            path=str(video_path),
-            csv_path=metadata['csv_path'],
-            fps=metadata['fps'],
-            total_frames=metadata['total_frames'],
-            duration_ms=metadata['duration_ms'],
-            uploaded_at=datetime.now()
-        )
-        
-        video.id = db.create_video(video)
-        
-        return video_to_response(video)
-        
+        with open(video_path, 'wb') as buffer:
+            shutil.copyfileobj(file.file, buffer)
     except Exception as e:
-        # Clean up on error
-        if video_path.exists():
-            video_path.unlink()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save video: {str(e)}"
+        )
+    
+    # Process video (pose extraction)
+    try:
+        metadata = process_video(video_path)
+    except Exception as e:
+        # Clean up on failure
+        video_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Video processing failed: {str(e)}"
         )
+    
+    # Create database record
+    video = Video(
+        filename=safe_filename,
+        path=str(video_path),
+        csv_path=metadata['csv_path'],
+        fps=metadata['fps'],
+        total_frames=metadata['total_frames'],
+        duration_ms=metadata['duration_ms'],
+        uploaded_at=datetime.now()
+    )
+    
+    video.id = db.create_video(video)
+    
+    return video_to_response(video)
 
 
 @app.get("/api/videos", response_model=List[VideoResponse])
@@ -422,6 +441,15 @@ async def create_move(move_data: MoveCreate):
             detail=f"Invalid move type: {move_data.move_type}"
         )
     
+    # Validate technique modifiers
+    valid_modifier_ids = [m['id'] for m in TECHNIQUE_MODIFIERS]
+    for modifier in move_data.technique_modifiers:
+        if modifier not in valid_modifier_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid technique modifier: {modifier}"
+            )
+    
     # Create move
     move = Move(
         video_id=move_data.video_id,
@@ -433,6 +461,7 @@ async def create_move(move_data: MoveCreate):
         form_quality=move_data.form_quality,
         effort_level=move_data.effort_level,
         contextual_data=move_data.contextual_data,
+        technique_modifiers=move_data.technique_modifiers,
         tags=move_data.tags,
         description=move_data.description,
         labeled_at=datetime.now()
@@ -497,6 +526,8 @@ async def update_move(move_id: int, move_data: MoveUpdate):
         move.effort_level = move_data.effort_level
     if move_data.contextual_data is not None:
         move.contextual_data = move_data.contextual_data
+    if move_data.technique_modifiers is not None:
+        move.technique_modifiers = move_data.technique_modifiers
     if move_data.tags is not None:
         move.tags = move_data.tags
     if move_data.description is not None:
