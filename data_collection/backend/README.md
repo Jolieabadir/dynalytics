@@ -1,6 +1,6 @@
-# Dynalytics UI - Backend Setup
+# Dynalytics - Backend API
 
-Clean, modular backend for the data collection UI.
+FastAPI backend for the data collection UI.
 
 ## Architecture
 
@@ -9,6 +9,7 @@ src/
 ├── labeling/           # Data layer (pure Python)
 │   ├── models.py       # Dataclasses (Video, Move, FrameTag)
 │   ├── database.py     # SQLite operations
+│   ├── exporter.py     # CSV export with label merging
 │   └── __init__.py
 └── web/                # API layer
     ├── api.py          # FastAPI routes
@@ -26,9 +27,6 @@ src/
 # Install dependencies
 pip install -r requirements.txt
 
-# Test backend components
-python test_backend.py
-
 # Run API server
 uvicorn src.web.api:app --reload --port 8000
 ```
@@ -43,16 +41,17 @@ Once running, visit:
 
 ### Configuration
 ```
-GET  /api/config                    # Get move types, questions, body parts
+GET  /api/config                    # Get move types, questions, body parts, tag types
 ```
 
 ### Videos
 ```
-POST /api/videos/upload             # Upload & process video
+POST /api/videos/upload             # Upload & process video (runs pose extraction)
 GET  /api/videos                    # List all videos
 GET  /api/videos/{id}               # Get video details
-GET  /api/videos/{id}/csv           # Download CSV
-GET  /api/videos/{id}/moves         # Get all moves for video
+GET  /api/videos/{id}/csv           # Download raw pose CSV
+POST /api/videos/{id}/export        # Export labeled CSV (optional: ?delete_video=true)
+GET  /api/videos/{id}/export/download  # Download exported labeled CSV
 ```
 
 ### Moves
@@ -61,19 +60,39 @@ POST /api/moves                     # Create move
 GET  /api/moves/{id}                # Get move details
 PUT  /api/moves/{id}                # Update move
 DELETE /api/moves/{id}              # Delete move (+ frame tags)
-GET  /api/moves/{id}/frame-tags     # Get frame tags for move
+GET  /api/videos/{id}/moves         # Get all moves for video
 ```
 
 ### Frame Tags
 ```
 POST /api/frame-tags                # Create frame tag
+GET  /api/moves/{id}/frame-tags     # Get frame tags for move
 DELETE /api/frame-tags/{id}         # Delete frame tag
 ```
+
+## Export System
+
+The export endpoint merges pose data with labels:
+
+```
+POST /api/videos/{id}/export?delete_video=true
+```
+
+**Process:**
+1. Reads raw pose CSV (`data/{video}.csv`)
+2. Fetches moves and frame tags from database
+3. Merges by frame number
+4. Outputs to `data/exports/{video}_labeled.csv`
+5. Optionally deletes video file to save storage
+
+**Exported columns added:**
+- `move_id`, `move_type`, `form_quality`, `effort_level`
+- `tag_type`, `tag_level`, `tag_locations`, `tag_note`
 
 ## Data Models
 
 ### Video
-```python
+```json
 {
     "id": 1,
     "filename": "climb.mov",
@@ -87,7 +106,7 @@ DELETE /api/frame-tags/{id}         # Delete frame tag
 ```
 
 ### Move
-```python
+```json
 {
     "id": 1,
     "video_id": 1,
@@ -96,143 +115,81 @@ DELETE /api/frame-tags/{id}         # Delete frame tag
     "timestamp_start_ms": 5000.0,
     "timestamp_end_ms": 6666.7,
     "move_type": "dyno",
-    "form_quality": 4,           # 1-5
-    "effort_level": 7,           # 0-10
+    "form_quality": 4,
+    "effort_level": 7,
     "contextual_data": {
         "catching_hand": "right_hand",
-        "push_foot": "left_foot",
-        "contact_at_launch": ["left_hand", "right_hand", "left_foot"],
-        "body_position": "side_on"
+        "push_foot": "left_foot"
     },
-    "tags": ["tweaky_feeling", "controlled"],
-    "description": "Big move from left foot, solid catch",
+    "tags": ["controlled"],
+    "description": "Big move from left foot",
     "labeled_at": "2026-01-14T19:35:00",
     "frame_tag_count": 2
 }
 ```
 
 ### Frame Tag
-```python
+```json
 {
     "id": 1,
     "move_id": 1,
     "frame_number": 155,
     "timestamp_ms": 5166.7,
-    "tag_type": "pain",
-    "level": 6,                  # 0-10 (for sensation tags)
-    "locations": ["left_knee"],
+    "tag_type": "sharp_pain",
+    "level": 6,
+    "locations": ["Left Elbow"],
     "note": "Sharp pain on push",
     "tagged_at": "2026-01-14T19:36:00"
 }
 ```
 
-## Move Type Configuration
+## Move Types
 
-Each move type has contextual questions defined in `models.py`:
+Defined in `models.py`:
+- static, deadpoint, dyno, lock_off, gaston, undercling
+- drop_knee, heel_hook, toe_hook, flag, mantle, campus
 
-```python
-MOVE_TYPE_QUESTIONS = {
-    'dyno': {
-        'catching_hand': {
-            'question': 'Which hand caught?',
-            'options': ['left_hand', 'right_hand', 'both_hands', 'missed']
-        },
-        # ... more questions
-    },
-    'lock_off': { ... },
-    'drop_knee': { ... },
-    # etc.
-}
-```
+Each has contextual questions that appear in the labeling form.
 
-To add a new move type:
-1. Add to `MOVE_TYPES` list
-2. Define questions in `MOVE_TYPE_QUESTIONS`
-3. Frontend will automatically render the form
+## Tag Types
 
-## Testing
+- `sharp_pain`, `dull_pain`, `pop`, `unstable`, `stretch_awkward`
+- `strong_controlled`, `weak`, `pumped`, `fatigue`
 
-Run component tests:
-```bash
-python test_backend.py
-```
+## Database
 
-This tests:
-- ✅ Data models (Video, Move, FrameTag)
-- ✅ Database operations (CRUD)
-- ✅ JSON serialization
-- ✅ Cascading deletes
-
-## Database Schema
-
-SQLite database at `data/labels.db`:
+SQLite at `data/labels.db`:
 
 ```sql
-videos:
-  - id, filename, path, csv_path, fps, total_frames, duration_ms, uploaded_at
+videos: id, filename, path, csv_path, fps, total_frames, duration_ms, uploaded_at
 
-moves:
-  - id, video_id, frame_start, frame_end, timestamp_start_ms, timestamp_end_ms
-  - move_type, form_quality, effort_level
-  - contextual_data (JSON), tags (JSON), description
-  - labeled_at
+moves: id, video_id, frame_start, frame_end, timestamp_start_ms, timestamp_end_ms,
+       move_type, form_quality, effort_level, contextual_data, tags, description, labeled_at
 
-frame_tags:
-  - id, move_id, frame_number, timestamp_ms
-  - tag_type, level, locations (JSON), note
-  - tagged_at
+frame_tags: id, move_id, frame_number, timestamp_ms, tag_type, level, locations, note, tagged_at
 ```
 
-## Development
+## Directory Structure
 
-### Adding a New Move Type
-
-1. Edit `src/labeling/models.py`:
-```python
-MOVE_TYPES.append('heel_hook')
-
-MOVE_TYPE_QUESTIONS['heel_hook'] = {
-    'hooking_foot': {
-        'question': 'Which foot hooked?',
-        'options': ['left_foot', 'right_foot']
-    },
-    # ... more questions
-}
 ```
-
-2. No other changes needed! API and frontend will automatically support it.
-
-### Adding a New Tag Type
-
-1. Edit `src/labeling/models.py`:
-```python
-TAG_TYPES['cramp'] = 'Muscle Cramp'
+backend/
+├── data/
+│   ├── labels.db              # SQLite database
+│   ├── {video}.csv            # Raw pose data
+│   └── exports/
+│       └── {video}_labeled.csv  # Exported labeled data
+├── videos/                    # Uploaded videos (deleted after export)
+├── src/
+│   ├── labeling/
+│   └── web/
+└── requirements.txt
 ```
-
-2. Frontend will automatically show it in tag options.
 
 ## Error Handling
 
-API uses standard HTTP status codes:
 - `200` - Success
 - `201` - Created
-- `204` - No Content (successful delete)
-- `400` - Bad Request (validation error)
+- `204` - No Content (delete)
+- `400` - Bad Request
 - `404` - Not Found
 - `500` - Internal Server Error
-
-Error responses:
-```json
-{
-  "detail": "Video 999 not found"
-}
-```
-
-## Next Steps
-
-1. ✅ Backend complete
-2. ⏭️ Build frontend (React)
-3. ⏭️ Connect frontend to API
-4. ⏭️ Test full workflow
-
-See `frontend/README.md` for frontend setup.

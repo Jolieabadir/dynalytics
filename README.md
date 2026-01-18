@@ -41,30 +41,34 @@ The base model provides immediate value, while personalization improves accuracy
 - CSV export with 40 data points per frame
 - Live visualization with skeleton overlay
 
-### Phase 2: Data Collection UI 🚧
+### Phase 2: Data Collection UI ✅
 Focus: Building the foundation for quality training data
 
 **Completed:**
 - [x] Web-based data collection interface (React + FastAPI)
-- [x] Video upload and automatic pose extraction
+- [x] Video upload with automatic pose extraction
 - [x] Frame-by-frame video scrubbing with keyboard shortcuts
 - [x] Move selection (mark start/end frames with `[` and `]` keys)
-- [x] Move labeling form (type, quality, contextual details)
-- [x] Skeleton overlay on video (working, needs scaling fix)
-- [x] Moves list display
-- [x] SQLite database for videos and labeled moves
+- [x] Move labeling form (type, quality, effort, contextual details)
+- [x] Frame tagging system (sensations: pain, instability, weakness, etc.)
+- [x] Body part selection for each tag
+- [x] Intensity levels (0-10) for tags
+- [x] Skeleton overlay on video
+- [x] Moves list with edit/delete functionality
+- [x] Export system (merges pose CSV + labels into ML-ready format)
+- [x] Auto video deletion after export (storage management)
+- [x] Thank you modal on completion
+- [x] SQLite database for videos, moves, and frame tags
 
-**Next:**
-- [ ] Frame-level labels within moves (initiation, peak, contact phases)
-- [ ] Fix skeleton overlay scaling
-- [ ] Export labeled data for ML training
+**Move Types Supported:**
+- Static, Deadpoint, Dyno, Lock-off, Gaston, Undercling
+- Drop Knee, Heel Hook, Toe Hook, Flag, Mantle, Campus
 
-**Data Collection Approach:**
-Users upload climbing clips and label isolated moves:
-- Mark start/end frames for each move
-- Classify move type: deadpoint, dyno, lock-off, flag, etc.
-- Rate quality and add contextual details
-- (Future) Add frame-level phase labels
+**Sensation Tags:**
+- 🔴 Sharp Pain, 🟠 Dull Pain, 🟣 Pop
+- 🟡 Unstable, 🩷 Stretch/Awkward
+- 🟢 Strong/Controlled, ⚫ Weak
+- 🔵 Pumped, 🟤 Fatigue
 
 ### Phase 3: Model Training (Next)
 - Base model for movement pattern recognition
@@ -103,9 +107,9 @@ Users upload climbing clips and label isolated moves:
 - MediaPipe
 - NumPy
 
-**Phase 2 (Current):**
+**Phase 2 (Complete):**
 - Backend: FastAPI, SQLite
-- Frontend: React, Vite
+- Frontend: React, Vite, Zustand
 - CV: MediaPipe (via Python CLI)
 
 **Phase 3 (Planned):**
@@ -132,15 +136,33 @@ dynalytics/
 │       └── settings.py         # Settings & thresholds
 ├── data_collection/
 │   ├── backend/                # FastAPI server
-│   │   ├── src/web/api.py      # REST endpoints
-│   │   ├── videos/             # Uploaded videos (gitignored)
-│   │   └── data/               # CSVs + SQLite DB (gitignored)
+│   │   ├── src/
+│   │   │   ├── labeling/
+│   │   │   │   ├── models.py       # Video, Move, FrameTag dataclasses
+│   │   │   │   ├── database.py     # SQLite operations
+│   │   │   │   └── exporter.py     # Label + pose CSV merger
+│   │   │   └── web/
+│   │   │       └── api.py          # REST endpoints
+│   │   ├── data/
+│   │   │   ├── labels.db           # SQLite database
+│   │   │   └── exports/            # ML-ready labeled CSVs
+│   │   └── videos/                 # Uploaded videos (temp, deleted after export)
 │   └── frontend/               # React app
-│       └── src/components/
-│           ├── VideoPlayer.jsx     # Video playback + controls
-│           ├── SkeletonOverlay.jsx # Pose visualization
-│           ├── MoveForm.jsx        # Move labeling form
-│           └── MovesList.jsx       # Display labeled moves
+│       └── src/
+│           ├── components/
+│           │   ├── VideoUpload.jsx
+│           │   ├── VideoPlayer.jsx
+│           │   ├── SkeletonOverlay.jsx
+│           │   ├── MoveForm.jsx
+│           │   ├── MovesList.jsx
+│           │   ├── TaggingMode.jsx
+│           │   ├── DoneButton.jsx
+│           │   └── ThankYouModal.jsx
+│           ├── api/
+│           │   ├── client.js
+│           │   └── ExportService.js
+│           └── store/
+│               └── useStore.js     # Zustand state management
 ├── tests/
 ├── data/                       # Output CSVs (gitignored)
 ├── videos/                     # Input videos (gitignored)
@@ -214,25 +236,36 @@ python visualizer_live.py video.mov data.csv --no-speed
 ```bash
 # Terminal 1 - Backend
 cd data_collection/backend
-source venv/bin/activate
-uvicorn src.web.api:app --reload
+source ../../venv/bin/activate
+uvicorn src.web.api:app --reload --port 8000
 
 # Terminal 2 - Frontend
 cd data_collection/frontend
+npm install  # first time only
 npm run dev
 ```
 
 Open http://localhost:5173
 
+**Workflow:**
+1. Upload a climbing video
+2. Mark move boundaries with `[` and `]` keys
+3. Fill out move details (type, quality, effort)
+4. Enter tagging mode to tag specific frames with sensations
+5. Click "Done" to export labeled data and clean up
+
 **Keyboard Shortcuts:**
-- **Space** - Play/Pause
-- **← →** - Step frame by frame
-- **[** - Mark move start
-- **]** - Mark move end
-- **S** - Toggle skeleton overlay
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Previous/Next frame |
+| `Space` | Play/Pause |
+| `[` | Mark move start |
+| `]` | Mark move end |
+| `S` | Toggle skeleton overlay |
 
 ## Data Output
 
+### Raw Pose CSV
 Each processed video generates a CSV with 40+ columns per frame:
 - **Metadata:** frame_number, timestamp_ms
 - **Angles:** 12 joint angles in degrees
@@ -240,10 +273,16 @@ Each processed video generates a CSV with 40+ columns per frame:
 - **Velocities:** x, y components for wrists, hips, center of mass
 - **Landmarks:** x, y, z, visibility for 15 body points (with --landmarks flag)
 
-Example row (frame with detected pose):
-```
-frame_number,timestamp_ms,angle_left_elbow,angle_right_elbow,...,speed_center_of_mass,velocity_left_wrist_x,...
-42,1400.5,145.2,152.8,...,98.3,12.5,...
+### Labeled Export CSV
+After labeling in the UI, exported CSVs include:
+- All pose data columns
+- `move_id`, `move_type`, `form_quality`, `effort_level`
+- `tag_type`, `tag_level`, `tag_locations`, `tag_note`
+
+Example row with labels:
+```csv
+frame_number,timestamp_ms,...,move_id,move_type,form_quality,effort_level,tag_type,tag_level,tag_locations,tag_note
+29,964.01,...,7,lock_off,3,5,weak,5,Left Elbow,
 ```
 
 ## Broader Applications
@@ -257,8 +296,8 @@ While currently focused on climbing, the methodology applies to any context wher
 
 **Started:** 2023 (initial prototype)
 **Rebooted:** 2026 (with improved ML and software engineering)
-**Current:** Phase 2 - Data Collection UI
-**Next:** Frame-level labels, then model training
+**Current:** Phase 2 Complete - Data Collection UI
+**Next:** Phase 3 - Model Training
 
 ## Related Work
 
