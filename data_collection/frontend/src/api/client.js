@@ -235,6 +235,26 @@ export const updateOutcome = async (outcomeId, outcomeData) => {
   return response.data;
 };
 
+// ==================== HOLDS ====================
+
+/**
+ * Holds for a video. bbox_* are normalized 0-1, so they must be compared
+ * against landmarks only after normalizing those — see services/holdMatching.
+ */
+export const getHolds = async (videoId) => {
+  const response = await api.get(`/api/videos/${videoId}/holds`);
+  return response.data;
+};
+
+export const createHold = async (holdData) => {
+  const response = await api.post('/api/holds', holdData);
+  return response.data;
+};
+
+export const deleteHold = async (holdId) => {
+  await api.delete(`/api/holds/${holdId}`);
+};
+
 // ==================== FRAME TAGS (Sensation) ====================
 
 export const createFrameTag = async (tagData) => {

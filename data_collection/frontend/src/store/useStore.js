@@ -49,6 +49,18 @@ const useStore = create((set, get) => ({
       moves: state.moves.filter((m) => m.id !== moveId),
     })),
 
+  // ==================== HOLDS STATE ====================
+  // Bounding boxes normalized 0-1, per video. Landmarks are stored in pixels,
+  // so anything comparing the two must normalize first (services/holdMatching).
+  holds: [],
+
+  setHolds: (holds) => set({ holds }),
+
+  addHold: (hold) => set((state) => ({ holds: [...state.holds, hold] })),
+
+  removeHold: (holdId) =>
+    set((state) => ({ holds: state.holds.filter((h) => h.id !== holdId) })),
+
   // ==================== FRAME TAGS STATE ====================
   frameTags: [],
 

@@ -634,8 +634,8 @@ correctly**, so whoever builds the feature does not rediscover the bug:
 | `holdMatching.nearestHoldsFor(...)` | Several landmarks at once. |
 | `holdMatching.CONTACT_LANDMARKS` | The four fingertip/toe points that touch holds. |
 
-`src/services/holdMatching.js` is marked **NOT WIRED UP** at the top of the file. It is
-tested but unreferenced by the app.
+`src/services/holdMatching.js` was marked NOT WIRED UP. **§12 wires it up** — the file
+itself is unchanged.
 
 Two deliberate choices:
 
@@ -726,3 +726,119 @@ the Supabase/R2 session is working in on `feat/supabase-r2-schema-v3`. **These e
 small and additive, but they will need a careful merge** if that branch has moved. The
 `apply_schema_sql` change in particular alters shared behaviour — it now applies all
 migrations rather than only the base schema.
+
+---
+
+## 12. Hold auto-suggest UI (follow-up)
+
+The primitives from §11 are now wired into the tagging flow. **`holdMatching.js` is
+byte-for-byte unchanged** — no unit handling was touched. Everything new sits on top of
+it and delegates every coordinate decision downward.
+
+### 12.1 What it does
+
+While tagging a frame, a **Holds in use** panel shows which holds the climber is on:
+
+```
+HOLDS IN USE                                 frame 412
+  ✋ Left hand      hold #11              on
+  🦶 Right foot     hold #33      2.1% away
+  [ Use all 2 ]
+  Suggested: left_wrist, right_ankle · left side
+```
+
+Clicking a row applies it to the frame-tag form. This is the part that makes it a
+*suggestion* rather than a readout: the contacts map onto fields that actually exist.
+`BODY_PARTS` has no fingertip or toe entry, so each contact degrades to the nearest real
+option — `left_index → left_wrist`, `right_foot_index → right_ankle` — which is what a
+tag on that limb would carry anyway.
+
+It is **read-only assistance**. It never writes a tag by itself, every suggestion is one
+click to apply and free to ignore, and applying is additive, so accepting two in a row
+keeps both body parts. `side` is only filled when the contacts agree on one — a tag
+carries a single side, so two hands must leave that to the labeller.
+
+### 12.2 Layering
+
+| Layer | File | Owns |
+|---|---|---|
+| Primitives (§11, **unchanged**) | `services/holdMatching.js` | pixel→normalized, point-to-box distance, nearest, unknown-size refusal |
+| Labelling logic (new) | `services/holdSuggestions.js` | limb→body-part mapping, contact threshold, visibility filter, reason codes |
+| UI (new) | `components/HoldSuggestions.jsx` | rendering, click-to-apply |
+| Wiring | `components/TaggingMode.jsx` | fetches holds, applies suggestions to the tag form |
+
+`holdSuggestions.js` does **no geometry**. It calls `nearestHoldsFor` and reads the
+result. If a suggestion is wrong in space, the bug is in the inputs — a missing
+`width`/`height`, a bad `bbox` — not in that file.
+
+Two thresholds, both judgement calls rather than derived facts:
+
+- **`CONTACT_THRESHOLD = 0.04`** — 4% of the frame. Roughly a hold's own width, which
+  absorbs landmark jitter without matching a limb halfway across the wall. Passed to
+  `nearestHold` as `maxDistance`, in normalized units.
+- **`minVisibility = 0.5`** — an occluded hand sitting exactly on a hold produces no
+  suggestion. A confident suggestion from a limb MediaPipe cannot see is worse than none.
+
+### 12.3 It explains itself when it has nothing to say
+
+Four distinguishable reasons, rendered as prose rather than an empty list, so "nothing
+detected" is never mistaken for "broken":
+
+| Reason | Shown as |
+|---|---|
+| `no-holds` | No holds recorded for this video yet |
+| `no-dimensions` | Registered before frame dimensions were stored — re-upload to enable |
+| `no-pose` | No pose detected on this frame |
+| `no-contact` | No hand or foot near a hold on this frame |
+
+`no-dimensions` is the §11 refusal surfacing in the UI: rather than assuming 1920×1080
+for a video registered before the migration, it says so.
+
+### 12.4 ⚠️ Prerequisite: nothing creates holds yet
+
+**In practice this panel will show "No holds recorded for this video yet" for every
+video today.** `/api/holds` accepts `POST`, but nothing in the frontend calls it — there
+is no hold-drawing UI and no detection. The suggest path is complete and tested; the
+supply of holds is not.
+
+Building hold creation was **not** in scope here and I did not add it. The smallest thing
+that would make this live is a box-drawing overlay on the video that `POST`s normalized
+`bbox_*` — the API client functions it would need (`createHold`, `deleteHold`) are
+already added and unused. Say the word.
+
+### 12.5 Also added
+
+- **Holds API client**: `getHolds(videoId)` → `GET /api/videos/{id}/holds`,
+  plus `createHold` / `deleteHold`. Endpoint paths verified against `api.py`.
+- **Store slice**: `holds`, `setHolds`, `addHold`, `removeHold`, matching the existing
+  `moves` / `frameTags` pattern.
+- **Fetch is best-effort.** A holds failure logs a warning and disables suggestions;
+  tagging works fine without them.
+- Routed one remaining raw `currentFrame / fps` display conversion in `TaggingMode`
+  through `frameToTime`. Same family as §3, correct before, just inconsistent.
+
+### 12.6 A real bug this surfaced
+
+The first run failed three tests on my own code. `Number('')` is `0`, and
+`Number.isFinite(0)` is `true` — so parsing a pose-less frame's empty landmark columns
+produced **a phantom limb at (0, 0)**, which then matched any hold near the frame's
+top-left corner *with full confidence and `inside: true`*.
+
+Fixed with an explicit `numberOrNull` that treats an empty cell as absent before any
+arithmetic, and pinned by a regression test. Worth noting that the trap was described in
+a comment in the test I wrote before the implementation hit it anyway — empty-string
+coercion is easy to write past.
+
+### 12.7 Verification
+
+**61 tests pass** (was 48). The 13 new ones cover row parsing and empty-column rejection,
+limb→body-part mapping against the real `BODY_PARTS` taxonomy, `sideFor` refusing on
+mixed sides, the threshold boundary (inside vs near vs beyond), the visibility filter,
+ordering surest-first, all four reason codes, the unknown-size refusal, and the
+phantom-limb regression.
+
+One test is worth calling out: **the same contact is resolved identically at 1920×1080,
+3840×2160 and 720×1280.** That is only true because the landmarks are normalized before
+comparison, and it is the property the whole §11/§12 pair exists to protect.
+
+Lint clean on every new and changed file; build succeeds.

@@ -40,6 +40,15 @@ import {
   nearestHoldsFor,
   CONTACT_LANDMARKS,
 } from '../src/services/holdMatching.js';
+import {
+  suggestHoldsForFrame,
+  landmarkFromRow,
+  contactLandmarksFromRow,
+  bodyPartsFor,
+  sideFor,
+  CONTACT_META,
+  CONTACT_THRESHOLD,
+} from '../src/services/holdSuggestions.js';
 import { goldenFrames } from './golden_frames.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -674,4 +683,202 @@ test('the contact landmarks exist in the 33-landmark set', () => {
     // And none of them existed in the old 15-landmark format.
     assert.ok(!LEGACY_LANDMARK_ORDER.includes(name), `${name} unexpectedly legacy`);
   }
+});
+
+// ==================== HOLD SUGGESTIONS ====================
+
+const W = 1920;
+const H = 1080;
+
+/** A parsed-CSV-style row: string values, pixel coordinates. */
+function rowWith(points) {
+  const row = { frame_number: '0', timestamp_ms: '0' };
+  for (const name of CSV_LANDMARK_ORDER) {
+    const p = points[name];
+    row[`landmark_${name}_x`] = p ? String(p.x) : '';
+    row[`landmark_${name}_y`] = p ? String(p.y) : '';
+    row[`landmark_${name}_z`] = p ? '0' : '';
+    row[`landmark_${name}_visibility`] = p ? String(p.visibility ?? 0.9) : '';
+  }
+  return row;
+}
+
+/** Normalized centre of a box, in pixels. */
+const centrePx = (box) => ({
+  x: (box.bbox_x + box.bbox_w / 2) * W,
+  y: (box.bbox_y + box.bbox_h / 2) * H,
+});
+
+const HOLD_A = { id: 11, bbox_x: 0.10, bbox_y: 0.20, bbox_w: 0.08, bbox_h: 0.08 };
+const HOLD_B = { id: 22, bbox_x: 0.70, bbox_y: 0.25, bbox_w: 0.08, bbox_h: 0.08 };
+const HOLD_C = { id: 33, bbox_x: 0.30, bbox_y: 0.80, bbox_w: 0.08, bbox_h: 0.08 };
+
+test('landmarkFromRow parses pixels and rejects empty columns', () => {
+  const row = rowWith({ left_index: { x: 123.5, y: 456.25, visibility: 0.8 } });
+
+  const lm = landmarkFromRow(row, 'left_index');
+  assert.equal(lm.x, 123.5);
+  assert.equal(lm.y, 456.25);
+  assert.equal(lm.visibility, 0.8);
+
+  // A pose-less column is empty string, not 0 — Number('') is 0, which would
+  // silently place the limb at the frame's top-left corner.
+  assert.equal(landmarkFromRow(row, 'right_index'), null);
+  assert.equal(landmarkFromRow(null, 'left_index'), null);
+});
+
+test('contactLandmarksFromRow returns only the present contact points', () => {
+  const row = rowWith({
+    left_index: centrePx(HOLD_A),
+    right_foot_index: centrePx(HOLD_C),
+  });
+  assert.deepEqual(
+    Object.keys(contactLandmarksFromRow(row)).sort(),
+    ['left_index', 'right_foot_index']
+  );
+});
+
+test('suggests the hold each limb is inside', () => {
+  const row = rowWith({
+    left_index: centrePx(HOLD_A),
+    right_index: centrePx(HOLD_B),
+    right_foot_index: centrePx(HOLD_C),
+  });
+
+  const { available, contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B, HOLD_C], W, H);
+  assert.equal(available, true);
+  assert.equal(contacts.length, 3);
+
+  const byName = Object.fromEntries(contacts.map((c) => [c.name, c]));
+  assert.equal(byName.left_index.hold.id, 11);
+  assert.equal(byName.right_index.hold.id, 22);
+  assert.equal(byName.right_foot_index.hold.id, 33);
+  for (const c of contacts) {
+    assert.equal(c.inside, true, `${c.name} should read as inside`);
+    assert.equal(c.distance, 0);
+  }
+});
+
+test('suggestions map limbs to the backend BODY_PARTS taxonomy', () => {
+  // BODY_PARTS has no fingertip or toe, so contacts must degrade to the wrist
+  // and ankle a tag can actually carry.
+  assert.equal(CONTACT_META.left_index.bodyPart, 'left_wrist');
+  assert.equal(CONTACT_META.right_index.bodyPart, 'right_wrist');
+  assert.equal(CONTACT_META.left_foot_index.bodyPart, 'left_ankle');
+  assert.equal(CONTACT_META.right_foot_index.bodyPart, 'right_ankle');
+
+  const row = rowWith({ left_index: centrePx(HOLD_A), left_foot_index: centrePx(HOLD_C) });
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_C], W, H);
+
+  assert.deepEqual(bodyPartsFor(contacts).sort(), ['left_ankle', 'left_wrist']);
+  assert.equal(sideFor(contacts), 'left', 'both contacts are left');
+});
+
+test('sideFor refuses to pick when the contacts disagree', () => {
+  const row = rowWith({ left_index: centrePx(HOLD_A), right_index: centrePx(HOLD_B) });
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B], W, H);
+  // A frame tag carries one side; mixed contacts must leave it to the labeller.
+  assert.equal(sideFor(contacts), null);
+});
+
+test('a limb beyond the threshold is not suggested', () => {
+  const far = { x: 0.5 * W, y: 0.5 * H }; // middle of the frame, no hold there
+  const row = rowWith({ left_index: centrePx(HOLD_A), right_index: far });
+
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B, HOLD_C], W, H);
+  assert.deepEqual(contacts.map((c) => c.name), ['left_index']);
+});
+
+test('a limb just outside a hold is suggested as near, not inside', () => {
+  // Half the threshold beyond the box's left edge.
+  const justOutside = {
+    x: (HOLD_A.bbox_x - CONTACT_THRESHOLD / 2) * W,
+    y: (HOLD_A.bbox_y + HOLD_A.bbox_h / 2) * H,
+  };
+  const row = rowWith({ left_index: justOutside });
+
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A], W, H);
+  assert.equal(contacts.length, 1);
+  assert.equal(contacts[0].inside, false);
+  assert.ok(contacts[0].distance > 0 && contacts[0].distance <= CONTACT_THRESHOLD);
+});
+
+test('low-visibility limbs are ignored', () => {
+  // An occluded hand sitting exactly on a hold should not produce a confident
+  // suggestion.
+  const row = rowWith({
+    left_index: { ...centrePx(HOLD_A), visibility: 0.1 },
+    right_index: { ...centrePx(HOLD_B), visibility: 0.95 },
+  });
+
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B], W, H);
+  assert.deepEqual(contacts.map((c) => c.name), ['right_index']);
+});
+
+test('contacts are ordered surest first', () => {
+  const nearB = {
+    x: (HOLD_B.bbox_x - CONTACT_THRESHOLD / 2) * W,
+    y: (HOLD_B.bbox_y + HOLD_B.bbox_h / 2) * H,
+  };
+  const row = rowWith({ right_index: nearB, left_index: centrePx(HOLD_A) });
+
+  const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B], W, H);
+  assert.equal(contacts[0].name, 'left_index', 'the inside match should lead');
+  assert.ok(contacts[0].distance <= contacts[1].distance);
+});
+
+test('every unavailable case reports a distinguishable reason', () => {
+  const row = rowWith({ left_index: centrePx(HOLD_A) });
+  const empty = rowWith({});
+
+  assert.equal(suggestHoldsForFrame(row, [], W, H).reason, 'no-holds');
+  assert.equal(suggestHoldsForFrame(row, [HOLD_A], null, null).reason, 'no-dimensions');
+  assert.equal(suggestHoldsForFrame(empty, [HOLD_A], W, H).reason, 'no-pose');
+
+  const far = rowWith({ left_index: { x: 0.5 * W, y: 0.5 * H } });
+  assert.equal(suggestHoldsForFrame(far, [HOLD_A], W, H).reason, 'no-contact');
+
+  for (const r of [[], [HOLD_A]]) {
+    assert.equal(suggestHoldsForFrame(row, r, W, H).contacts.length >= 0, true);
+  }
+});
+
+test('unknown frame size never guesses a suggestion', () => {
+  // The video record predates the dimensions migration. Guessing 1920x1080
+  // would produce confident, unverifiable matches.
+  const row = rowWith({ left_index: centrePx(HOLD_A) });
+  const result = suggestHoldsForFrame(row, [HOLD_A], undefined, undefined);
+
+  assert.equal(result.available, false);
+  assert.equal(result.reason, 'no-dimensions');
+  assert.deepEqual(result.contacts, []);
+});
+
+test('suggestions scale with resolution rather than assuming one', () => {
+  // The same climber on the same wall, filmed at two resolutions, must yield
+  // the same hold. This only works because the landmarks are normalized.
+  for (const [w, h] of [[1920, 1080], [3840, 2160], [720, 1280]]) {
+    const row = rowWith({
+      left_index: { x: (HOLD_A.bbox_x + HOLD_A.bbox_w / 2) * w, y: (HOLD_A.bbox_y + HOLD_A.bbox_h / 2) * h },
+    });
+    const { contacts } = suggestHoldsForFrame(row, [HOLD_A, HOLD_B, HOLD_C], w, h);
+    assert.equal(contacts[0]?.hold.id, 11, `failed at ${w}x${h}`);
+    assert.equal(contacts[0].inside, true);
+  }
+});
+
+test('a pose-less frame produces no phantom limb at the origin', () => {
+  // Regression: Number('') is 0 and Number.isFinite(0) is true, so parsing an
+  // empty column directly put every limb at (0,0) — which then matched any
+  // hold near the frame's top-left corner with full confidence.
+  const originHold = { id: 99, bbox_x: 0, bbox_y: 0, bbox_w: 0.1, bbox_h: 0.1 };
+  const poseless = rowWith({});
+
+  assert.equal(landmarkFromRow(poseless, 'left_index'), null);
+  assert.deepEqual(contactLandmarksFromRow(poseless), {});
+
+  const result = suggestHoldsForFrame(poseless, [originHold], W, H);
+  assert.equal(result.available, false);
+  assert.equal(result.reason, 'no-pose');
+  assert.deepEqual(result.contacts, []);
 });
