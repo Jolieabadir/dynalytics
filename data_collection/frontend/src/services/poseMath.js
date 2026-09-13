@@ -321,6 +321,30 @@ export function csvHeaders() {
   return headers;
 }
 
+/** Decimal places kept for landmark coordinates in the CSV. */
+export const COORD_DECIMALS = 4;
+
+/** Decimal places kept for landmark visibility in the CSV. */
+export const VISIBILITY_DECIMALS = 3;
+
+/**
+ * Round for output only.
+ *
+ * Applied in the writer, never to the in-memory result, so angles and
+ * centre-of-mass speed are still computed at full precision and only the stored
+ * text is shortened. Uses round-and-divide rather than toFixed so that values
+ * stringify without padding: 0 stays "0", not "0.0000".
+ *
+ * x and y are pixels at source resolution, so 4 decimals is 1/10000 of a pixel
+ * — far below anything measurable. z and visibility are roughly normalized.
+ */
+function round(value, decimals) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return value;
+  const factor = 10 ** decimals;
+  // + 0 collapses -0 to 0, which would otherwise stringify inconsistently.
+  return Math.round(value * factor) / factor + 0;
+}
+
 /** Build the CSV string. Column order and value formatting are a fixed contract. */
 export function framesToCSV(frames) {
   const landmarkNames = CSV_LANDMARK_ORDER;
@@ -344,7 +368,12 @@ export function framesToCSV(frames) {
     for (const name of landmarkNames) {
       const lm = frame.result?.landmarks?.[name];
       if (lm) {
-        row.push(lm.x, lm.y, lm.z, lm.visibility);
+        row.push(
+          round(lm.x, COORD_DECIMALS),
+          round(lm.y, COORD_DECIMALS),
+          round(lm.z, COORD_DECIMALS),
+          round(lm.visibility, VISIBILITY_DECIMALS)
+        );
       } else {
         row.push('', '', '', '');
       }

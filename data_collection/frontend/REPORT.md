@@ -425,10 +425,16 @@ The 18 new landmarks are **appended after** the original 15 rather than interlea
 MediaPipe index order. Index order would have been tidier, but it would push
 `left_shoulder` from column 19 to column 23 and shift every column after it.
 
-Appending keeps the change **purely additive**: the first 75 columns are byte-for-byte
-what they were. A positional reader of the old format keeps working unchanged, and a
-name-based reader is unaffected either way. Within the appended block the 18 are in
-MediaPipe index order, so there is still a rule, just applied to the new columns only.
+Appending keeps the change **purely additive in layout**: the first 75 columns are the
+same columns, in the same order, under the same names. A positional reader of the old
+format keeps working unchanged, and a name-based reader is unaffected either way. Within
+the appended block the 18 are in MediaPipe index order, so there is still a rule, just
+applied to the new columns only.
+
+> **Note on "byte-identical".** §10 rounds coordinates for output, which changes the
+> *values* in every landmark column including the original 15. The columns are unchanged;
+> the digits in them are shorter. A byte-comparison against a CSV produced before §10
+> will differ, and that is intended.
 
 New names are MediaPipe's canonical ones. The original 15 already used canonical names,
 so **no existing column name changed**:
@@ -481,32 +487,109 @@ Both are column-agnostic; **no backend change is needed**:
 - No `landmark_*` or `angle_*` name appears anywhere in the backend Python. The other
   `frame_number` hits are the `frame_tags` table, unrelated to the pose CSV.
 
-### ⚠️ Size: this doubles the CSV, against a 60 MB cap
+### Size: doubled by the widening, then more than undone by rounding
 
-Measured from the golden file: **1,154 → 2,330 bytes per row, a 2.02× increase.**
+The widening alone took the row from **1,154 → 2,330 bytes, a 2.02× increase**, which put
+a 5-minute 60fps clip at ~48 MB against the backend's 60 MB `MAX_REGISTER_BYTES`.
 
-| Clip | Pose CSV (was) | Pose CSV (now) |
-|---|---|---|
-| 2 min @ 30fps | ~4.0 MB | ~8.0 MB |
-| 2 min @ 60fps | ~7.9 MB | **~16.0 MB** |
-| 5 min @ 60fps | ~23.8 MB | **~48.0 MB** |
+**§10 resolved this.** Rounding coordinates for output brings the row to **1,091 bytes** —
+*below the original 75-column format's 1,154*, with 18 more landmarks in it. Current
+figures are in §10.
 
-`MAX_REGISTER_BYTES` in `api.py` is **60 MB**, and register returns `413` above it. The
-2-minute target case is comfortable at ~16 MB, but **a 60fps clip beyond roughly 6
-minutes will now be rejected where it previously fit.** Nothing here changes that cap —
-it is backend, and out of scope — but it is the one operational consequence of the
-widening, and worth knowing before someone uploads a long clip.
+### One visible side effect — resolved in §10
 
-Two cheap mitigations if it bites, neither done here: round coordinates to 2–3 decimals
-(most of the row is float noise well below pixel precision — likely a 30–40% saving on
-its own), or gzip the body.
+`SkeletonOverlay` drew a joint dot for **every** `landmark_*` column it found, so the
+widening would have put 33 dots on the overlay instead of 15, cluttering the face.
+**§10 filters the display back to the original 15.**
 
-### One visible side effect
+---
 
-`SkeletonOverlay` draws a joint dot for **every** `landmark_*` column it finds, so the
-overlay will now also dot the eyes, ears, mouth, fingers and toes — 33 dots instead of
-15. The skeleton *lines* are unchanged, since `SKELETON_CONNECTIONS` is a fixed list.
-Nothing breaks, but the overlay will look busier around the face. Left alone
-deliberately: trimming it is a display decision, not a data one. Filtering
-`extractLandmarks` to `LEGACY_LANDMARK_ORDER`, or giving face points a smaller radius,
-would be the fix if you want the old look.
+## 10. Output rounding and overlay filtering (follow-up)
+
+### 10.1 Coordinate rounding
+
+Landmark values are rounded **in the CSV writer only**:
+
+| Field | Decimals |
+|---|---|
+| `landmark_*_x`, `landmark_*_y`, `landmark_*_z` | **4** |
+| `landmark_*_visibility` | **3** |
+
+Rounding is applied at write time, never to the in-memory result, so angles and
+centre-of-mass speed are still derived from full-precision landmarks — only the stored
+text is shortened. `Math.round(v * 10**d) / 10**d` rather than `toFixed`, so values
+stringify without padding (`0` stays `"0"`, not `"0.0000"`), with `-0` collapsed to `0`
+and no exponent notation. Three tests enforce all of that.
+
+**Correcting the premise this was requested under:** `x` and `y` are **pixel coordinates
+at source resolution**, not normalized — `computeResult` multiplies MediaPipe's
+normalized output by the original `videoWidth`/`videoHeight` (§1.4). Only `z` and
+`visibility` are roughly normalized. The 4-decimal choice is still safe, but for a
+different reason than "sub-pixel up to 10k": at pixel scale 4 decimals is **1/10,000 of a
+pixel**, which is far more headroom than needed at any resolution. 2 decimals would still
+be comfortably sub-pixel and would save more; 4 is kept as specified.
+
+`speed_center_of_mass`, the 12 angles and `timestamp_ms` are **not** rounded — they were
+not in scope, and at 1 column each their contribution is negligible next to 132 landmark
+columns. Rounding the angles too would be an easy further saving.
+
+### 10.2 Measured effect
+
+Golden file: **96,744 → 47,208 bytes, a 51% reduction.**
+
+| Format | Bytes/row |
+|---|---|
+| 75 columns, unrounded (original) | 1,154 |
+| 147 columns, unrounded (after §9) | 2,330 |
+| **147 columns, rounded (now)** | **1,091** |
+
+**The rounding more than pays for the widening.** The CSV now carries 18 more landmarks
+per frame in *fewer* bytes per row than the original 15-landmark format used.
+
+| Clip | Pose CSV |
+|---|---|
+| 2 min @ 30fps | ~3.7 MB |
+| 2 min @ 60fps | ~7.5 MB |
+| 5 min @ 60fps | ~22.5 MB |
+| 10 min @ 60fps | ~45.0 MB |
+
+**Maximum clip under the 60 MB `MAX_REGISTER_BYTES` cap: 57,656 frames**, i.e.
+
+- **16.0 minutes at 60fps** (was ~6 minutes after §9, ~12 minutes before the widening)
+- **32.0 minutes at 30fps**
+
+The 2-minute target case sits at ~7.5 MB, roughly 12% of the cap. The `413` ceiling is no
+longer a practical concern for climbing footage.
+
+### 10.3 Tests
+
+**36 tests pass** (was 33). The golden file was regenerated with the rounded values, and
+the three new tests cover:
+
+- no landmark coordinate exceeds 4 decimals, no visibility exceeds 3, and nothing uses
+  exponent notation — checked across every value in the golden file
+- rounding does **not** reach back into `computeResult`, so in-memory precision is intact
+- values rounding toward zero from either side produce `0`, never `-0` or `1e-7`
+
+**The first-75-columns test still passes.** Note what it now means: it asserts that the
+first 75 columns of the current output match the pre-widening *column layout* — same
+columns, same order, same names. It is not a claim that the bytes match a CSV produced
+before rounding, which they deliberately do not.
+
+Row count, `frame_index` contiguity and `timestamp = frame_index / fps` are untouched and
+still green.
+
+### 10.4 Overlay: 33 landmarks stored, 15 drawn
+
+`SkeletonOverlay` now draws joint dots only for the original 15 body landmarks, via
+`LEGACY_LANDMARK_ORDER` imported from `poseMath`. **Skeleton lines are unchanged** —
+`SKELETON_CONNECTIONS` was already a fixed list and never depended on the landmark count.
+
+The data/display split is deliberate and commented in place: all 33 landmarks are
+extracted, stored and exported; the overlay just doesn't dot eyes, ears, mouth, fingers
+and toes, which cluttered the face without saying anything about the climbing. Anything
+wanting the face or hand points reads them from the CSV, where they still are.
+
+Incidentally this removed one pre-existing lint error (an unused loop variable in the old
+`Object.entries` iteration), taking `SkeletonOverlay.jsx` from 5 problems to 4. The
+remaining 4 are pre-existing hoisting and dependency-array warnings, untouched.

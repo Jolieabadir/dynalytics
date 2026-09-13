@@ -468,3 +468,62 @@ test('the golden file preserves the pre-widening columns verbatim', () => {
 
   assert.deepEqual(legacyOnly, goldenPrefix);
 });
+
+// ==================== OUTPUT ROUNDING ====================
+
+test('coordinates are written with at most 4 decimals, visibility at most 3', () => {
+  const header = csvHeaders();
+  const decimalsOf = (s) => (s.includes('.') ? s.split('.')[1].length : 0);
+
+  for (const line of golden.split('\n').slice(1)) {
+    const fields = line.split(',');
+    for (let i = 0; i < fields.length; i++) {
+      const value = fields[i];
+      if (value === '') continue;
+      const col = header[i];
+      if (!col.startsWith('landmark_')) continue;
+
+      const limit = col.endsWith('_visibility') ? 3 : 4;
+      assert.ok(
+        decimalsOf(value) <= limit,
+        `${col} = ${value} exceeds ${limit} decimals`
+      );
+      assert.ok(!/e/i.test(value), `${col} = ${value} used exponent notation`);
+    }
+  }
+});
+
+test('rounding happens in the writer, not in the computed result', () => {
+  // Angles and centre-of-mass speed are derived from full-precision landmarks,
+  // so rounding must not reach back into computeResult.
+  const raw = Array.from({ length: 33 }, (_, i) => ({
+    x: 0.123456789 + i * 1e-7,
+    y: 0.987654321,
+    z: 0.5555555555,
+    visibility: 0.1234567,
+  }));
+  const result = computeResult(raw, 1920, 1080, 0, {});
+
+  const x = result.landmarks.nose.x;
+  assert.ok(
+    String(x).split('.')[1]?.length > 4,
+    `in-memory x should keep full precision, got ${x}`
+  );
+  assert.equal(result.landmarks.nose.visibility, 0.1234567);
+});
+
+test('rounding does not introduce -0 or exponent notation', () => {
+  const raw = Array.from({ length: 33 }, () => ({
+    x: -0.000000001, // rounds to zero from below
+    y: 0.00001,      // rounds to zero from above
+    z: -0.00004,
+    visibility: 0.0004,
+  }));
+  const frames = [{ frameNum: 0, timestampMs: 0, result: computeResult(raw, 1920, 1080, 0, {}) }];
+  const fields = framesToCSV(frames).split('\n')[1].split(',');
+
+  for (let i = 15; i < fields.length; i++) {
+    assert.ok(!fields[i].startsWith('-0') || Number(fields[i]) !== 0, `got negative zero: ${fields[i]}`);
+    assert.ok(!/e/i.test(fields[i]), `got exponent notation: ${fields[i]}`);
+  }
+});
