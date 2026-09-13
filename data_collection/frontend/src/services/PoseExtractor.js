@@ -1,4 +1,40 @@
+/**
+ * Client-side pose extraction.
+ *
+ * Strategy: play the video through once and capture each frame as the decoder
+ * presents it, rather than seeking to each frame in turn. A seek-per-frame walk
+ * makes the decoder re-decode from the preceding keyframe every time, which is
+ * what made a 2-minute clip take many minutes. Playing through decodes each
+ * frame exactly once, so the floor is roughly the clip's own length.
+ *
+ * The loop pauses on every frame callback and only resumes after inference has
+ * finished, so a slow device falls behind wall-clock time but never drops a
+ * frame.
+ *
+ * Requires requestVideoFrameCallback (Chrome, Edge, Safari). There is
+ * deliberately no seek-based fallback — maintaining the slow path was the
+ * problem being removed.
+ */
 import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+
+// Pinned to the version in package-lock.json. The WASM glue and the JS wrapper
+// must agree, and `@latest` also defeats CDN caching between uploads.
+const TASKS_VISION_VERSION = '0.10.32';
+const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`;
+const MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+
+/** Longest edge of the inference canvas. Input downscale cap. */
+const MAX_INFERENCE_EDGE = 512;
+
+/** fps values a phone or camera actually produces. Detection snaps to these. */
+const KNOWN_FPS = [24, 25, 30, 48, 50, 60, 120];
+
+/** How much of the clip to sample before deciding on fps. */
+const FPS_SAMPLE_SECONDS = 2;
+
+/** How long to wait for the first frame callback before calling it a decode failure. */
+const FIRST_FRAME_TIMEOUT_MS = 5000;
 
 // MediaPipe landmark indices we care about (maps to our landmark names)
 const LANDMARK_MAP = {
@@ -32,6 +68,45 @@ const ANGLE_DEFINITIONS = [
   ['left_ankle', 'left_knee', 'left_ankle', 'left_heel'],
   ['right_ankle', 'right_knee', 'right_ankle', 'right_heel'],
 ];
+
+const DECODE_UNSUPPORTED_MESSAGE =
+  "This video format can't be decoded in this browser. On iPhone, set " +
+  'Camera → Formats → Most Compatible, or convert to H.264 (MP4).';
+
+/** Thrown when the browser cannot decode the file at all (e.g. HEVC on Chrome). */
+export class DecodeUnsupportedError extends Error {
+  constructor(message = DECODE_UNSUPPORTED_MESSAGE) {
+    super(message);
+    this.name = 'DecodeUnsupported';
+  }
+}
+
+/** Thrown when the browser has no requestVideoFrameCallback. */
+export class FrameCallbackUnsupportedError extends Error {
+  constructor() {
+    super(
+      'This browser cannot step through video frames. Please use Chrome, Edge, or Safari.'
+    );
+    this.name = 'FrameCallbackUnsupported';
+  }
+}
+
+/** Thrown by cancel(). Callers treat this as "no error", not a failure. */
+export class ExtractionCancelledError extends Error {
+  constructor() {
+    super('Extraction cancelled');
+    this.name = 'ExtractionCancelled';
+  }
+}
+
+export function supportsFrameCallback() {
+  return (
+    typeof HTMLVideoElement !== 'undefined' &&
+    typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function'
+  );
+}
+
+// ==================== GEOMETRY ====================
 
 function angleBetween(a, b, c) {
   // Calculate angle at point b given three landmarks
@@ -79,41 +154,145 @@ function distance(a, b) {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
 }
 
+// ==================== fps DETECTION ====================
+
+/**
+ * Infer fps from the intervals between presented frames.
+ *
+ * Median rather than mean: a single long interval (a stalled decode, a
+ * backgrounded tab) would drag a mean badly, but moves a median barely at all.
+ * The result snaps to the nearest plausible capture rate, since a measured
+ * 59.94 and a measured 60.02 are both a 60fps camera.
+ */
+export function detectFps(mediaTimes) {
+  if (!mediaTimes || mediaTimes.length < 3) return null;
+
+  const deltas = [];
+  for (let i = 1; i < mediaTimes.length; i++) {
+    const d = mediaTimes[i] - mediaTimes[i - 1];
+    if (d > 0) deltas.push(d);
+  }
+  if (deltas.length === 0) return null;
+
+  deltas.sort((a, b) => a - b);
+  const mid = Math.floor(deltas.length / 2);
+  const median =
+    deltas.length % 2 === 0 ? (deltas[mid - 1] + deltas[mid]) / 2 : deltas[mid];
+  if (!(median > 0)) return null;
+
+  const measured = 1 / median;
+
+  let best = KNOWN_FPS[0];
+  let bestDiff = Infinity;
+  for (const candidate of KNOWN_FPS) {
+    const diff = Math.abs(candidate - measured);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/** frame_index for a presentation time, per the detected rate. */
+export function frameIndexFor(mediaTimeSeconds, fps) {
+  return Math.round(mediaTimeSeconds * fps);
+}
+
+/** Total frames in a clip of this duration. Rounds, so the last partial frame survives. */
+export function totalFramesFor(durationSeconds, fps) {
+  return Math.round(durationSeconds * fps);
+}
+
+// ==================== MODEL SINGLETON ====================
+
+let landmarkerPromise = null;
+let landmarkerDelegate = null;
+
+async function createLandmarker(delegate) {
+  const vision = await FilesetResolver.forVisionTasks(WASM_BASE);
+  return PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+    minPoseDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+}
+
+/**
+ * Load the PoseLandmarker once per page load.
+ *
+ * Cached as a promise rather than a value so that two uploads started in quick
+ * succession share one download instead of racing. GPU first, CPU on failure.
+ */
+export function getPoseLandmarker() {
+  if (!landmarkerPromise) {
+    landmarkerPromise = (async () => {
+      try {
+        const lm = await createLandmarker('GPU');
+        landmarkerDelegate = 'GPU';
+        return lm;
+      } catch (gpuError) {
+        console.warn('[PoseExtractor] GPU delegate unavailable, falling back to CPU:', gpuError);
+        const lm = await createLandmarker('CPU');
+        landmarkerDelegate = 'CPU';
+        return lm;
+      }
+    })().catch((err) => {
+      // Don't cache a failure; the next attempt should be able to retry.
+      landmarkerPromise = null;
+      throw err;
+    });
+  }
+  return landmarkerPromise;
+}
+
+export function getDelegate() {
+  return landmarkerDelegate;
+}
+
+// ==================== EXTRACTOR ====================
+
 export class PoseExtractor {
   constructor() {
     this.poseLandmarker = null;
-    this.previousLandmarks = null;
-    this.previousTimestamp = null;
+    this.previousCom = null;
+    this.previousTimestampMs = null;
+    this.cancelled = false;
+    this._cleanup = null;
+    this._onCancel = null;
+    // detectForVideo requires strictly increasing timestamps across a session.
+    this._lastDetectTimestamp = -1;
   }
 
   async initialize() {
-    const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-    );
-    this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
-        delegate: 'GPU',
-      },
-      runningMode: 'VIDEO',
-      numPoses: 1,
-      minPoseDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
+    this.poseLandmarker = await getPoseLandmarker();
+    return this.poseLandmarker;
   }
 
-  processFrame(videoElement, timestampMs) {
+  /**
+   * Run inference on one already-drawn canvas.
+   *
+   * `videoWidth`/`videoHeight` are the ORIGINAL video dimensions, not the
+   * canvas's. MediaPipe returns normalized coordinates and the CSV contract
+   * stores pixels at source resolution, so denormalizing against the downscaled
+   * canvas would silently shrink every coordinate.
+   */
+  processCanvas(canvas, timestampMs, videoWidth, videoHeight) {
     if (!this.poseLandmarker) return null;
 
-    const result = this.poseLandmarker.detectForVideo(videoElement, timestampMs);
+    // Strictly increasing, or MediaPipe rejects the call.
+    const ts = Math.max(timestampMs, this._lastDetectTimestamp + 0.001);
+    this._lastDetectTimestamp = ts;
+
+    const result = this.poseLandmarker.detectForVideo(canvas, ts);
 
     if (!result.landmarks || result.landmarks.length === 0) {
       return null;
     }
 
     const rawLandmarks = result.landmarks[0];
-    const videoWidth = videoElement.videoWidth;
-    const videoHeight = videoElement.videoHeight;
 
     // Convert normalized coords to pixel coords and map to our names
     const landmarks = {};
@@ -146,103 +325,370 @@ export class PoseExtractor {
     let comSpeed = 0;
     if (landmarks['left_hip'] && landmarks['right_hip']) {
       const com = midpoint(landmarks['left_hip'], landmarks['right_hip']);
-      if (this.previousLandmarks && this.previousTimestamp !== null) {
-        const prevCom = this.previousLandmarks._com;
-        const dt = (timestampMs - this.previousTimestamp) / 1000; // seconds
-        if (prevCom && dt > 0) {
-          comSpeed = distance(com, prevCom) / dt;
+      if (this.previousCom && this.previousTimestampMs !== null) {
+        const dt = (timestampMs - this.previousTimestampMs) / 1000; // seconds
+        if (dt > 0) {
+          comSpeed = distance(com, this.previousCom) / dt;
         }
       }
-      // Store for next frame
+      this.previousCom = com;
+      this.previousTimestampMs = timestampMs;
       landmarks._com = com;
     }
-
-    this.previousLandmarks = landmarks;
-    this.previousTimestamp = timestampMs;
 
     return { landmarks, angles, comSpeed };
   }
 
-  async extractFromVideo(videoElement, fps, onProgress) {
-    // Process all frames by seeking through the video
-    const duration = videoElement.duration;
-    const totalFrames = Math.floor(duration * fps);
-    const frames = [];
-
-    this.previousLandmarks = null;
-    this.previousTimestamp = null;
-
-    for (let frameNum = 0; frameNum < totalFrames; frameNum++) {
-      const timestampMs = (frameNum / fps) * 1000;
-      videoElement.currentTime = timestampMs / 1000;
-
-      // Wait for seek to complete
-      await new Promise(resolve => {
-        videoElement.onseeked = resolve;
-      });
-
-      const result = this.processFrame(videoElement, timestampMs);
-      frames.push({ frameNum, timestampMs, result });
-
-      if (onProgress) {
-        onProgress(frameNum, totalFrames);
-      }
-    }
-
-    return frames;
+  /** Abort an in-flight extraction. Safe to call more than once. */
+  cancel() {
+    this.cancelled = true;
+    if (this._onCancel) this._onCancel();
+    if (this._cleanup) this._cleanup();
   }
 
-  framesToCSV(frames) {
-    // Build CSV string matching Python pipeline format exactly
-    const landmarkNames = Object.values(LANDMARK_MAP);
-
-    // Header
-    const headers = [
-      'frame_number', 'timestamp_ms', 'speed_center_of_mass',
-      ...ANGLE_DEFINITIONS.map(([name]) => `angle_${name}`),
-      'angle_upper_back', 'angle_lower_back',
-    ];
-    for (const name of landmarkNames) {
-      headers.push(`landmark_${name}_x`, `landmark_${name}_y`, `landmark_${name}_z`, `landmark_${name}_visibility`);
+  /**
+   * Extract every frame of a video file.
+   *
+   * @param {File|Blob} file
+   * @param {object} callbacks
+   * @param {(p: {progress: number, currentTime: number, duration: number, framesCaptured: number, fps: number|null}) => void} [callbacks.onProgress]
+   * @param {(state: 'loading'|'detecting-fps'|'extracting'|'paused-hidden') => void} [callbacks.onState]
+   * @returns {Promise<{rows: Array, fps: number, totalFrames: number, duration: number, width: number, height: number}>}
+   */
+  async extractFromFile(file, { onProgress, onState } = {}) {
+    if (!supportsFrameCallback()) {
+      throw new FrameCallbackUnsupportedError();
     }
 
-    const rows = [headers.join(',')];
+    this.previousCom = null;
+    this.previousTimestampMs = null;
+    this._lastDetectTimestamp = -1;
+    this.cancelled = false;
 
-    for (const frame of frames) {
-      const row = [
-        frame.frameNum,
-        frame.timestampMs,
-        frame.result ? frame.result.comSpeed : 0,
-      ];
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.src = objectUrl;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    // Kept out of the layout but still decoded. `display:none` lets some
+    // browsers skip frame presentation entirely.
+    video.style.position = 'fixed';
+    video.style.opacity = '0';
+    video.style.pointerEvents = 'none';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.left = '-10px';
+    video.style.top = '-10px';
+    document.body.appendChild(video);
 
-      // Angles
-      for (const [angleName] of ANGLE_DEFINITIONS) {
-        row.push(frame.result?.angles?.[angleName] ?? '');
-      }
-      row.push(frame.result?.angles?.['upper_back'] ?? '');
-      row.push(frame.result?.angles?.['lower_back'] ?? '');
+    let frameHandle = null;
+    let released = false;
+    let onVisibilityChange = () => {};
 
-      // Landmarks
-      for (const name of landmarkNames) {
-        const lm = frame.result?.landmarks?.[name];
-        if (lm) {
-          row.push(lm.x, lm.y, lm.z, lm.visibility);
-        } else {
-          row.push('', '', '', '');
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (frameHandle !== null && video.cancelVideoFrameCallback) {
+        try {
+          video.cancelVideoFrameCallback(frameHandle);
+        } catch {
+          /* already fired */
         }
       }
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      try {
+        video.pause();
+      } catch {
+        /* not playing */
+      }
+      video.removeAttribute('src');
+      video.load();
+      video.remove();
+      URL.revokeObjectURL(objectUrl);
+    };
+    this._cleanup = release;
 
-      rows.push(row.join(','));
+    try {
+      await this._loadMetadata(video);
+
+      if (!video.videoWidth || !video.videoHeight) {
+        throw new DecodeUnsupportedError();
+      }
+
+      const duration = video.duration;
+      if (!Number.isFinite(duration) || duration <= 0) {
+        throw new DecodeUnsupportedError();
+      }
+
+      const videoWidth = video.videoWidth;
+      const videoHeight = video.videoHeight;
+
+      // Downscaled inference surface, sized once.
+      const scale = Math.min(1, MAX_INFERENCE_EDGE / Math.max(videoWidth, videoHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(videoHeight * scale));
+      const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+
+      if (onState) onState('loading');
+      await this.initialize();
+
+      if (this.cancelled) throw new ExtractionCancelledError();
+
+      if (onState) onState('detecting-fps');
+
+      // ---- capture loop ----
+
+      const samples = []; // { mediaTime, result }
+      const fpsSampleTimes = [];
+      let fps = null;
+      let sawFirstFrame = false;
+
+      let resolveDone;
+      let rejectDone;
+      const done = new Promise((resolve, reject) => {
+        resolveDone = resolve;
+        rejectDone = reject;
+      });
+
+      this._onCancel = () => rejectDone(new ExtractionCancelledError());
+
+      let pausedForHidden = false;
+      onVisibilityChange = () => {
+        if (document.hidden) {
+          pausedForHidden = true;
+          if (onState) onState('paused-hidden');
+          try {
+            video.pause();
+          } catch {
+            /* ignore */
+          }
+        } else if (pausedForHidden) {
+          pausedForHidden = false;
+          if (onState) onState(fps ? 'extracting' : 'detecting-fps');
+          video.play().catch(() => {});
+        }
+      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+
+      video.addEventListener('error', () => {
+        rejectDone(new DecodeUnsupportedError());
+      });
+
+      video.addEventListener('ended', () => {
+        resolveDone();
+      });
+
+      const onFrame = async (_now, metadata) => {
+        if (this.cancelled) return;
+
+        try {
+          video.pause();
+
+          const mediaTime = metadata.mediaTime;
+          sawFirstFrame = true;
+
+          // Decide fps once enough of the head of the clip has been seen.
+          if (fps === null) {
+            fpsSampleTimes.push(mediaTime);
+            if (
+              mediaTime >= FPS_SAMPLE_SECONDS ||
+              mediaTime >= duration - 1e-6 ||
+              fpsSampleTimes.length > 300
+            ) {
+              fps = detectFps(fpsSampleTimes) ?? 30;
+              if (onState) onState('extracting');
+            }
+          }
+
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const result = this.processCanvas(canvas, mediaTime * 1000, videoWidth, videoHeight);
+          samples.push({ mediaTime, result });
+
+          if (onProgress) {
+            onProgress({
+              progress: duration > 0 ? Math.min(1, mediaTime / duration) : 0,
+              currentTime: mediaTime,
+              duration,
+              framesCaptured: samples.length,
+              fps,
+            });
+          }
+
+          if (this.cancelled) return;
+
+          // Past the last frame the 'ended' event may never arrive if the
+          // decoder stops presenting; treat reaching the end as done.
+          if (video.ended) {
+            resolveDone();
+            return;
+          }
+
+          frameHandle = video.requestVideoFrameCallback(onFrame);
+          if (!pausedForHidden) {
+            await video.play().catch(() => {});
+          }
+        } catch (err) {
+          rejectDone(err);
+        }
+      };
+
+      frameHandle = video.requestVideoFrameCallback(onFrame);
+      await video.play().catch(() => {
+        throw new DecodeUnsupportedError();
+      });
+
+      // A file the browser accepts but cannot actually decode never presents a
+      // frame. Nothing else detects that case.
+      const firstFrameTimer = setTimeout(() => {
+        if (!sawFirstFrame) rejectDone(new DecodeUnsupportedError());
+      }, FIRST_FRAME_TIMEOUT_MS);
+
+      try {
+        await done;
+      } finally {
+        clearTimeout(firstFrameTimer);
+      }
+
+      if (this.cancelled) throw new ExtractionCancelledError();
+
+      if (samples.length === 0) {
+        throw new DecodeUnsupportedError();
+      }
+
+      if (fps === null) {
+        fps = detectFps(fpsSampleTimes) ?? 30;
+      }
+
+      const rows = buildRows(samples, fps);
+      const totalFrames = totalFramesFor(duration, fps);
+
+      return { rows, fps, totalFrames, duration, width: videoWidth, height: videoHeight };
+    } finally {
+      this._onCancel = null;
+      release();
+      this._cleanup = null;
     }
+  }
 
-    return rows.join('\n');
+  _loadMetadata(video) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener('loadedmetadata', onLoaded);
+        video.removeEventListener('error', onError);
+      };
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new DecodeUnsupportedError());
+      };
+      video.addEventListener('loadedmetadata', onLoaded);
+      video.addEventListener('error', onError);
+    });
+  }
+
+  framesToCSV(rows) {
+    return framesToCSV(rows);
   }
 
   close() {
-    if (this.poseLandmarker) {
-      this.poseLandmarker.close();
-    }
+    // The landmarker is a shared singleton and is deliberately NOT closed here;
+    // closing it would force the next upload to re-download the model.
+    this.previousCom = null;
+    this.previousTimestampMs = null;
   }
 }
 
+/**
+ * Turn captured samples into contiguous CSV rows.
+ *
+ * Two invariants matter downstream: SkeletonOverlay indexes the parsed CSV by
+ * position, so row N must be frame N; and frame numbers must line up with what
+ * the player computes from currentTime. So frame_number comes from the
+ * presentation time, duplicates are dropped, and any hole is filled with an
+ * empty (pose-less) row rather than left as a gap.
+ */
+export function buildRows(samples, fps) {
+  const ordered = [...samples].sort((a, b) => a.mediaTime - b.mediaTime);
+
+  const byIndex = new Map();
+  for (const sample of ordered) {
+    const frameNum = frameIndexFor(sample.mediaTime, fps);
+    // First writer wins: the earliest presentation time for this index.
+    if (!byIndex.has(frameNum)) {
+      byIndex.set(frameNum, sample.result);
+    }
+  }
+
+  if (byIndex.size === 0) return [];
+
+  let maxIndex = 0;
+  for (const key of byIndex.keys()) {
+    if (key > maxIndex) maxIndex = key;
+  }
+
+  const rows = [];
+  for (let frameNum = 0; frameNum <= maxIndex; frameNum++) {
+    rows.push({
+      frameNum,
+      // Derived from the index, so timestamp_ms === frame_number / fps exactly.
+      timestampMs: (frameNum / fps) * 1000,
+      result: byIndex.has(frameNum) ? byIndex.get(frameNum) : null,
+    });
+  }
+  return rows;
+}
+
+/** Build the CSV string. Column order and formatting are a fixed contract. */
+export function framesToCSV(frames) {
+  const landmarkNames = Object.values(LANDMARK_MAP);
+
+  // Header
+  const headers = [
+    'frame_number', 'timestamp_ms', 'speed_center_of_mass',
+    ...ANGLE_DEFINITIONS.map(([name]) => `angle_${name}`),
+    'angle_upper_back', 'angle_lower_back',
+  ];
+  for (const name of landmarkNames) {
+    headers.push(`landmark_${name}_x`, `landmark_${name}_y`, `landmark_${name}_z`, `landmark_${name}_visibility`);
+  }
+
+  const rows = [headers.join(',')];
+
+  for (const frame of frames) {
+    const row = [
+      frame.frameNum,
+      frame.timestampMs,
+      frame.result ? frame.result.comSpeed : 0,
+    ];
+
+    // Angles
+    for (const [angleName] of ANGLE_DEFINITIONS) {
+      row.push(frame.result?.angles?.[angleName] ?? '');
+    }
+    row.push(frame.result?.angles?.['upper_back'] ?? '');
+    row.push(frame.result?.angles?.['lower_back'] ?? '');
+
+    // Landmarks
+    for (const name of landmarkNames) {
+      const lm = frame.result?.landmarks?.[name];
+      if (lm) {
+        row.push(lm.x, lm.y, lm.z, lm.visibility);
+      } else {
+        row.push('', '', '', '');
+      }
+    }
+
+    rows.push(row.join(','));
+  }
+
+  return rows.join('\n');
+}
+
+export { LANDMARK_MAP, ANGLE_DEFINITIONS, KNOWN_FPS, MAX_INFERENCE_EDGE, DECODE_UNSUPPORTED_MESSAGE };
 export default PoseExtractor;
