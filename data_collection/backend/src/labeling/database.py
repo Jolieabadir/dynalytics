@@ -190,16 +190,19 @@ class Database:
         video_id: int,
         user_id: str,
         r2_video_key: Optional[str] = None,
+        r2_pose_csv_key: Optional[str] = None,
         r2_export_key: Optional[str] = None,
     ) -> bool:
-        """Record an R2 key on a video. Only the keys passed are written."""
+        """Record one or more R2 keys on a video. Only the keys passed are written."""
         sets, params = [], []
-        if r2_video_key is not None:
-            sets.append('r2_video_key = %s')
-            params.append(r2_video_key)
-        if r2_export_key is not None:
-            sets.append('r2_export_key = %s')
-            params.append(r2_export_key)
+        for column, value in (
+            ('r2_video_key', r2_video_key),
+            ('r2_pose_csv_key', r2_pose_csv_key),
+            ('r2_export_key', r2_export_key),
+        ):
+            if value is not None:
+                sets.append(f'{column} = %s')
+                params.append(value)
         if not sets:
             return False
 
