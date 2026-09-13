@@ -6,7 +6,14 @@
  * metadata measured here.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getMoves, registerVideo, uploadOriginalVideo } from '../api/client';
+import {
+  getMoves,
+  registerVideo,
+  uploadOriginalVideo,
+  createHoldsBulk,
+  getHolds,
+} from '../api/client';
+import { detectHolds, HOLD_DETECTION_ENABLED } from '../services/holdDetector';
 import { NotSignedInError } from '../api/auth';
 import useStore from '../store/useStore';
 import PoseExtractor, {
@@ -37,6 +44,34 @@ function parseCsv(csvString) {
     .filter((row) => row.frame_number !== undefined && row.frame_number !== '');
 }
 
+
+/**
+ * Grab the first frame of the clip and run the detector over it.
+ *
+ * Uses a detached <video> rather than the player, so this can run before the
+ * player has mounted. Seeks to 0 and waits for a frame to actually be
+ * available — `loadeddata` fires once there is one.
+ */
+async function detectFirstFrameHolds(blobUrl) {
+  const video = document.createElement('video');
+  video.src = blobUrl;
+  video.muted = true;
+  video.playsInline = true;
+
+  await new Promise((resolve, reject) => {
+    video.onloadeddata = resolve;
+    video.onerror = () => reject(new Error('Could not read the first frame'));
+  });
+
+  video.currentTime = 0;
+  await new Promise((resolve) => {
+    if (video.readyState >= 2) resolve();
+    else video.onseeked = resolve;
+  });
+
+  return detectHolds(video);
+}
+
 function VideoUpload() {
   const [processing, setProcessing] = useState(false);
   const [phase, setPhase] = useState(null);
@@ -51,6 +86,7 @@ function VideoUpload() {
 
   const {
     setCurrentVideo,
+    setHolds,
     setMoves,
     setVideoBlobUrl,
     setCsvData,
@@ -156,6 +192,24 @@ function VideoUpload() {
         await uploadOriginalVideo(videoData.id, file);
       } catch (uploadErr) {
         console.warn('[VideoUpload] Original video upload failed; pose data is saved.', uploadErr);
+      }
+
+      // Holds: detect on the first frame and post them, if the detector is
+      // enabled. Best-effort — a missing or failing detector must never cost
+      // the labeler their extraction, and every hold can be placed by hand.
+      setStatus('Finding holds…');
+      try {
+        let holds = [];
+        if (HOLD_DETECTION_ENABLED) {
+          const boxes = await detectFirstFrameHolds(blobUrl);
+          if (boxes.length) {
+            holds = await createHoldsBulk(videoData.id, boxes);
+          }
+        }
+        setHolds(holds.length ? holds : await getHolds(videoData.id));
+      } catch (holdErr) {
+        console.warn('[VideoUpload] Hold detection skipped:', holdErr);
+        setHolds([]);
       }
 
       setCurrentVideo(videoData);

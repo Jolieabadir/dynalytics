@@ -18,6 +18,7 @@ import { useState, useEffect } from 'react';
 import useStore, { HOLD_SLOT_KEYS } from '../store/useStore';
 import { fpsOf, frameToTime, frameToMs } from '../utils/frames';
 import { optionLabel, optionDescription } from '../utils/taxonomy';
+import { suggestHoldSlots } from '../services/holdAssignment';
 import InfoTip from './InfoTip';
 import { createMove, createEnvironment, createOutcome, deleteMove } from '../api/client';
 
@@ -51,6 +52,8 @@ function MoveForm() {
     config,
     holdPickSlot,
     setHoldPickSlot,
+    holds,
+    csvData,
   } = useStore();
 
   // Lens 1: Environment
@@ -102,6 +105,52 @@ function MoveForm() {
     setError(null);
     // previousEnvironment is a stable object between saves; re-running on every
     // identity change would wipe edits mid-form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Auto-suggest a hold for each slot from the pose data.
+   *
+   * At the start frame the hands are on their starting holds; at the end frame
+   * the reaching hand is on the target. Suggestions are marked `suggested` and
+   * stay that way until the labeler touches the slot — so a wrong guess is
+   * visible rather than silently adopted.
+   *
+   * Runs once per open. A slot the labeler has already filled is left alone.
+   */
+  useEffect(() => {
+    if (!holds?.length || !csvData?.length) return;
+    if (moveStart === null || moveEnd === null) return;
+
+    const frameSize = {
+      width: currentVideo?.width || currentVideo?.video_width,
+      height: currentVideo?.height || currentVideo?.video_height,
+    };
+    // Without the original resolution the CSV's pixel coordinates cannot be
+    // normalized, and every suggestion would be nonsense. Better none.
+    if (!frameSize.width || !frameSize.height) return;
+
+    const rowAt = (frame) =>
+      csvData.find((r) => Number(r.frame_number) === frame) ?? null;
+
+    const suggestion = suggestHoldSlots({
+      holds,
+      startRow: rowAt(moveStart),
+      endRow: rowAt(moveEnd),
+      frameSize,
+    });
+
+    setSlots((prev) => {
+      const next = { ...prev };
+      for (const slot of SLOT_ORDER) {
+        const id = suggestion[slot];
+        if (id != null && next[slot].hold_id == null && !next[slot].suggested) {
+          next[slot] = { ...next[slot], hold_id: id, suggested: true };
+        }
+      }
+      return next;
+    });
+    // Once per open: the suggestion is a starting point, not a live binding.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
