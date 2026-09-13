@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from ..labeling.database import Database, SchemaNotApplied
@@ -31,10 +32,19 @@ from .auth import get_current_user_id
 # Largest body accepted on register, which carries the pose CSV inline.
 MAX_REGISTER_BYTES = 60 * 1024 * 1024
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Close the connection pool on shutdown, if this module opened it."""
+    yield
+    if _db is not None and _db_owned:
+        _db.close()
+
+
 app = FastAPI(
     title="Dynalytix Climbing Data Collection API",
     description="API for labeling climbing movement data",
-    version="3.0.0"
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -53,7 +63,7 @@ async def limit_register_body(request: Request, call_next):
         content_length = request.headers.get('content-length')
         if content_length and content_length.isdigit() and int(content_length) > MAX_REGISTER_BYTES:
             return JSONResponse(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=413,
                 content={
                     'detail': (
                         f'Body exceeds {MAX_REGISTER_BYTES} bytes. '
@@ -67,13 +77,17 @@ async def limit_register_body(request: Request, call_next):
 # Lazily built so the module imports without DATABASE_URL (tests, tooling).
 _db: Optional[Database] = None
 _exporter: Optional[Exporter] = None
+# True only when this module opened the pool, so an injected one (tests) is
+# never closed out from under its owner on app shutdown.
+_db_owned: bool = False
 
 
 def get_db() -> Database:
     """Return the process-wide Database, opening the pool on first use."""
-    global _db
+    global _db, _db_owned
     if _db is None:
         _db = Database()
+        _db_owned = True
     return _db
 
 
@@ -83,12 +97,6 @@ def get_exporter() -> Exporter:
     if _exporter is None:
         _exporter = Exporter(get_db())
     return _exporter
-
-
-@app.on_event("shutdown")
-def _close_pool():
-    if _db is not None:
-        _db.close()
 
 
 # ==================== PYDANTIC SCHEMAS ====================
@@ -582,7 +590,7 @@ async def register_video(
     """
     if len(payload.csv_data.encode('utf-8')) > MAX_REGISTER_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=413,
             detail=f'Pose CSV exceeds {MAX_REGISTER_BYTES} bytes',
         )
 
