@@ -4,6 +4,9 @@ Data models for labeling system.
 Three-lens model: Environment / Strategy / Outcome
 These are pure Python dataclasses with no database dependencies.
 Database layer handles persistence separately.
+
+Schema version 4 (storage v3): per-user scoping, hold bounding boxes, and
+slot-based environments. Every record carries the owning Supabase user id.
 """
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -12,15 +15,22 @@ from typing import Optional
 
 @dataclass
 class Video:
-    """Represents an uploaded video with metadata."""
+    """Represents an uploaded video with metadata.
+
+    Pose CSV, the original video and the export all live in R2; the table only
+    keeps their object keys. ``r2_video_key`` stays None until the browser has
+    finished its direct-to-R2 upload and called confirm-upload.
+    """
 
     id: Optional[int] = None
+    user_id: str = ""
     filename: str = ""
-    path: str = ""
-    csv_path: str = ""
     fps: float = 0.0
     total_frames: int = 0
     duration_ms: float = 0.0
+    r2_video_key: Optional[str] = None
+    r2_pose_csv_key: Optional[str] = None
+    r2_export_key: Optional[str] = None
     uploaded_at: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -39,6 +49,39 @@ class Video:
 
 
 @dataclass
+class Hold:
+    """A hold on the wall, located by a normalized bounding box.
+
+    Coordinates are fractions of frame width/height in the range 0-1 so they
+    survive any later re-encode or resize of the source video.
+    """
+
+    id: Optional[int] = None
+    video_id: int = 0
+    user_id: str = ""
+    bbox_x: float = 0.0
+    bbox_y: float = 0.0
+    bbox_w: float = 0.0
+    bbox_h: float = 0.0
+    source: str = "manual"  # detected | manual
+    created_at: Optional[datetime] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        data = asdict(self)
+        if self.created_at:
+            data['created_at'] = self.created_at.isoformat()
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Hold':
+        """Create from dictionary."""
+        if 'created_at' in data and isinstance(data['created_at'], str):
+            data['created_at'] = datetime.fromisoformat(data['created_at'])
+        return cls(**data)
+
+
+@dataclass
 class Move:
     """
     Represents a labeled climbing move (Lens 2: Strategy).
@@ -48,6 +91,7 @@ class Move:
 
     id: Optional[int] = None
     video_id: int = 0
+    user_id: str = ""
     frame_start: int = 0
     frame_end: int = 0
     timestamp_start_ms: float = 0.0
@@ -55,20 +99,14 @@ class Move:
 
     # Strategy lens
     approach: str = ""  # static | dynamic | coordination
-    size: str = ""  # small | medium | large
     move_tags: list[str] = field(default_factory=list)  # multi-select from MOVE_TAGS
-    timing: Optional[str] = None  # simultaneous | sequential | alternating
-    dyno_style: Optional[str] = None  # double_clutch | paddle | single_arm_catch (only when dyno tag)
+    size: str = ""  # small | medium | large
 
-    # Quality metrics (unchanged)
+    # Quality metrics
     form_quality: int = 3  # 1-5
     effort_level: int = 5  # 0-10
+    confidence: str = ""  # low | med | high
 
-    # Contextual data (kept but unused - design decision pending)
-    contextual_data: dict = field(default_factory=dict)
-
-    # Tags and description
-    tags: list[str] = field(default_factory=list)
     description: str = ""
 
     # Metadata
@@ -102,16 +140,32 @@ class Environment:
     """
     Represents the environment context for a move (Lens 1: Environment).
 
-    One record per move, joined by move_id.
+    One record per move, joined by move_id. Each of the four hold slots may
+    point at a row in ``holds`` and carries its own type and quality list; all
+    slots are optional, which covers no-hands, no-feet and one-hand moves.
     """
 
     id: Optional[int] = None
     move_id: int = 0
+    user_id: str = ""
 
     wall_angle: str = ""  # slab | vertical | gentle_overhang | steep
-    hold_type_reaching: str = ""  # horizontal_edge | gaston | side_pull | undercling
-    hold_type_non_reaching: str = ""  # horizontal_edge | gaston | side_pull | undercling
-    hold_quality: list[str] = field(default_factory=list)  # multi-select: incut | sloped | small
+
+    start_left_hold_id: Optional[int] = None
+    start_left_hold_type: Optional[str] = None
+    start_left_hold_quality: list[str] = field(default_factory=list)
+
+    start_right_hold_id: Optional[int] = None
+    start_right_hold_type: Optional[str] = None
+    start_right_hold_quality: list[str] = field(default_factory=list)
+
+    end_hold_id: Optional[int] = None
+    end_hold_type: Optional[str] = None
+    end_hold_quality: list[str] = field(default_factory=list)
+
+    foot_hold_id: Optional[int] = None
+    foot_hold_type: Optional[str] = None
+    foot_hold_quality: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -133,10 +187,10 @@ class Outcome:
 
     id: Optional[int] = None
     move_id: int = 0
+    user_id: str = ""
 
     result: str = ""  # success | fall
     reach_detail: str = ""  # reached_controlled | reached_not_controlled | didnt_reach
-    foot_cut: bool = False
     confidence: str = ""  # low | med | high
 
     def to_dict(self) -> dict:
@@ -159,22 +213,20 @@ class FrameTag:
 
     id: Optional[int] = None
     move_id: int = 0
+    user_id: str = ""
     frame_number: int = 0
     timestamp_ms: float = 0.0
 
     # Tag type from TAG_TYPES
     tag_type: str = ""
 
+    side: Optional[str] = None  # left | right | null
+
     # For sensation tags (0-10 scale, None for non-sensation tags)
     level: Optional[int] = None
 
     # Body part locations (for sensation tags)
     locations: list[str] = field(default_factory=list)
-
-    # New fields for three-lens schema
-    side: Optional[str] = None  # left | right | null
-    traction_source: Optional[str] = None  # hip | hand | null
-    traction_direction: Optional[str] = None  # free text, nullable
 
     # Optional note
     note: str = ""
@@ -222,11 +274,9 @@ MOVE_TAGS = [
     'dyno',
     'foot_move',
     'no_hands',
+    'technical',
+    'tension',
 ]
-
-TIMINGS = ['simultaneous', 'sequential', 'alternating']
-
-DYNO_STYLES = ['double_clutch', 'paddle', 'single_arm_catch']
 
 # =============================================================================
 # LENS 1: ENVIRONMENT CONSTANTS
@@ -237,6 +287,12 @@ WALL_ANGLES = ['slab', 'vertical', 'gentle_overhang', 'steep']
 HOLD_TYPES = ['horizontal_edge', 'gaston', 'side_pull', 'undercling', 'jug', 'pinch']
 
 HOLD_QUALITIES = ['incut', 'sloped', 'small']
+
+# The four hold slots an environment can reference. Column names are derived
+# from these: {slot}_hold_id, {slot}_hold_type, {slot}_hold_quality.
+HOLD_SLOTS = ['start_left', 'start_right', 'end', 'foot']
+
+HOLD_SOURCES = ['detected', 'manual']
 
 # =============================================================================
 # LENS 3: OUTCOME CONSTANTS
@@ -265,8 +321,6 @@ TAG_TYPES = {
 }
 
 SIDES = ['left', 'right']
-
-TRACTION_SOURCES = ['hip', 'hand']
 
 # Body part options for sensation tagging (unchanged - 16 entries)
 BODY_PARTS = [
