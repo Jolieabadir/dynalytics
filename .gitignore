@@ -15,3 +15,8 @@ __pycache__/
 
 # Supabase CLI local state (contains the pooler URL with credentials)
 **/supabase/.temp/
+
+# Local pose-extraction output. The 11 CSVs already tracked under
+# data_collection/backend/data/ predate this rule and stay tracked; new ones
+# belong in R2, not in git.
+data_collection/backend/data/video_*.csv
