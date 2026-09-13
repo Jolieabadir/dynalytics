@@ -60,6 +60,334 @@ Read from `App.jsx`, `store/useStore.js`, `api/client.js`, `api/auth.js`,
 
 ---
 
+---
+
+## C1. Per-file changes
+
+### New files
+
+| File | What it is |
+|---|---|
+| `src/components/AuthGate.jsx` | Email + password sign-up / sign-in screen, shown whenever there is no session. One toggle between modes, client-side validation before any API call, and Supabase's terse errors translated into plain language. |
+| `src/components/InfoTip.jsx` | The "i" beside an option. Hover and focus reveal the definition; a click pins it for touch devices. Renders nothing when config has no definition, rather than an empty bubble. |
+| `src/components/OnboardingBanner.jsx` | The define / tagging one-liners. Dismissal goes to the store, session-only. |
+| `src/components/ProgressStrip.jsx` | Persistent "{n} defined · {m} labeled · {k} tagged" header with Save & Next Move and Finish & Export. |
+| `src/components/HoldOverlay.jsx` | Hold boxes over the video: drag to add, click to delete, and a pick mode for assigning a box to a form slot. |
+| `src/services/holdDetector.js` | YOLOv8n / onnxruntime-web detection. **Off by default, no weights bundled** — see §C4. |
+| `src/services/holdAssignment.js` | Pure nearest-box suggestion from the pose CSV. |
+| `src/utils/taxonomy.js` | `optionLabel` / `optionDescription` — reads `display_label` and definitions out of config. |
+| `src/utils/progress.js` | `progressCounts`, the defined/labeled/tagged arithmetic. |
+| `src/test/setup.js`, `vitest.config.js` | DOM test environment. |
+| 5 × `*.test.js(x)` | 66 tests — see §C5. |
+
+### Changed files
+
+| File | Change |
+|---|---|
+| `src/App.jsx` | **Rewritten.** Reads the persisted session at boot and follows it; renders `AuthGate` when there is none. Config now loads *after* a session exists — it requires a bearer token in v3, and loading it first was why a signed-out user hung on "Loading Dynalytix…". Header gains the account email and Sign out. Define mode gains the progress strip, the banner, and a side-panel layout. Finish & Export resolves the presigned link. |
+| `src/api/auth.js` | Added `signUp`, `signIn`, `signOut`, `getSession`, `onAuthChange`, `refreshSession`, and `readableAuthError`. The token reader it already had is unchanged. |
+| `src/api/client.js` | Response interceptor refreshes once on 401 and replays the request. Holds CRUD added (`getHolds`, `createHoldsBulk`, `createHold`, `updateHold`, `deleteHold`). `exportVideo` no longer sends `?delete_video`. `getExportDownloadUrl` reads the 307 `Location` instead of expecting a body. `getVideoCsvText` fetches the CSV with auth. |
+| `src/api/ExportService.js` | Reduced to a re-export of the client's implementations, so the two existing import sites keep working. |
+| `src/components/MoveForm.jsx` | **Rewritten.** A right-side `<aside>` panel instead of a full-screen modal. Four hold slots, each with its own hold type, hold qualities, and "pick on video". Auto-suggest on open. Every option carries its definition. `timing`, `dyno_style`, `tags` and `foot_cut` removed; `confidence` added. Config comes from the store rather than a second fetch. |
+| `src/components/VideoPlayer.jsx` | **Rewritten.** Hold overlay wired in, toggled with `H`. CSV fallback now sends the token and follows the 307 (it previously sent no auth and expected a body). **Keyboard guard narrowed** to genuine text entry, so `[` and `]` keep working while the panel is open and a radio has focus. `csvData` derived rather than mirrored into state. |
+| `src/components/TaggingMode.jsx` | `traction_sources` / `traction_source` / `traction_direction` removed — all dropped in v3, and the component would have failed its own config validation against the live backend. Config from the store. Banner and tag-type definitions added. |
+| `src/components/ThankYouModal.jsx` | Shows the presigned download link, says it expires, and distinguishes a failed export from a failed link. |
+| `src/components/VideoUpload.jsx` | After register + upload, runs detection on the first frame (when enabled), posts the boxes in bulk, and loads holds into the store. Entirely best-effort. |
+| `src/store/useStore.js` | `previousEnvironment` moved to the four-slot v3 shape (`hold_id` deliberately never carries over). Added holds, overlay toggle, pick slot, `dismissedBanners`, `session`, and `resetForSignOut`. |
+| `src/App.css` | ~290 lines for the auth screen, progress strip, banners, tooltips, panel layout, hold overlay, and a narrow-screen stack. |
+| `vite.config.js` | Marks `onnxruntime-web` external when detection is off — see §C4. |
+| `package.json` | Added `onnxruntime-web`; vitest + testing-library + jsdom. `npm test` now runs both suites. |
+
+### Backend (only the three areas the brief allowed)
+
+| File | Change |
+|---|---|
+| `src/labeling/models.py` | `DEFINITIONS` — plain-language descriptions for all 11 taxonomies, plus `display_label` on `reach_details`. |
+| `src/web/api.py` | `/api/config` serves `definitions`. New `POST /api/videos/{id}/holds` (bulk, capped at 200) and `PUT /api/holds/{id}`. New `HoldItem` / `HoldBulkCreate` / `HoldUpdate` schemas. |
+| `src/labeling/database.py` | `create_holds_bulk` (one transaction) and `update_hold` (box and source only — `video_id`/`user_id` are fixed at creation). |
+
+---
+
+## C2. Definitions — the two that were being read backwards
+
+Both are called out explicitly in the UI, not just in the config:
+
+- **Confidence** is *the labeler's confidence in the labels they just gave* — the camera angle, the speed, the taxonomy. Not how confident the climber looked on the wall.
+- **Size** is *the size of the movement*. Not the size of the hold.
+
+`reach_details` carries `display_label` so Taylor's preferred wording can land without touching a stored enum value or migrating existing rows. **Taylor's wording is still pending**; the current labels are placeholders chosen to be unambiguous:
+
+| Stored value | Current display | 
+|---|---|
+| `reached_controlled` | Reached it — in control |
+| `reached_not_controlled` | Reached it — not in control |
+| `didnt_reach` | Did not reach it |
+
+---
+
+## C3. Defaults taken
+
+1. **Config is loaded once, in `App`, after sign-in**, and read from the store by everything else. `MoveForm` and `TaggingMode` each used to fetch it independently.
+2. **401 refreshes once and replays.** A second 401 propagates and the auth listener shows the sign-in screen. Guarded against a loop by a flag on the request.
+3. **Banner dismissal is session-only**, per the brief — no localStorage. A test asserts nothing is written there.
+4. **`hold_id` never carries over between moves.** Hold *type* and *quality* prefill from the previous move; the id would point at the wrong box.
+5. **Hold deletes are optimistic**, and roll back if the server refuses.
+6. **Suggestions are marked `suggested` until touched.** Any edit to a slot clears the flag. A wrong guess is visible rather than silently adopted.
+7. **A distance cap (0.15 of the frame) means no suggestion rather than a wrong one.**
+8. **The `foot` slot is optional**; `start_left`, `start_right` and `end` require a hold type unless the move is tagged No Hands.
+9. **Empty slots are sent as `{}`**, which is how v3 expresses no-hands, one-hand and no-feet moves.
+10. **Finish & Export does not block on the download link.** A failed link is reported as such; the labels are saved either way.
+
+---
+
+## C4. The hold detector: source, licence, and why it ships off
+
+**Surveyed 2026-09-13. No permissively-licensed climbing-hold model exists.**
+
+| Model | Licence | Signal | Files |
+|---|---|---|---|
+| `jwlarocque/yolov8n-freeclimbs-detect-2` | **AGPL-3.0** | 0 downloads, 3 likes | fp16 + fp32 `.onnx`, `.pt` |
+| `samolego/yolo-holds` | **AGPL-3.0** | 0 downloads, 0 likes | `.pt` only |
+| `ricardosreichert/holds_yolo_v8` | **none declared** (= all rights reserved) | 0 downloads, 0 likes | `.pt` only |
+
+The first is the best technical fit: a single "hold" class, trained on home and spray walls, and it ships ONNX. Its card notes that an earlier MIT label was an error and AGPL-3.0 is binding.
+
+The constraint is **structural, not bad luck**: Ultralytics YOLOv8 is itself AGPL-3.0, so every fine-tune of it inherits the copyleft. "A YOLOv8n-format ONNX with a permissive licence" is close to a contradiction in terms today.
+
+Bundling AGPL-3.0 weights into a web frontend would put AGPL obligations on the served application. That is a licensing decision for the project owner, not a default to take quietly — so this takes the fallback the brief specified:
+
+- **The manual flow is complete and is the shipped path.** Drag to add, click to delete, pick-on-video per slot, auto-suggest from the pose data. Nothing about labeling depends on the detector.
+- **Detection is behind `VITE_ENABLE_HOLD_DETECTION`, default off, with no weights in the repo.**
+- The full onnxruntime-web decode path is written and lazily imported. The flag is written so Rollup folds it, and `vite.config.js` marks the package external when off — the default build is 643 KB with no wasm; flipping the flag on bundles the ~28 MB runtime properly. Both paths verified.
+
+**To enable**, once a model is chosen and its licence accepted:
+
+```bash
+# 1. put the .onnx at public/models/holds.onnx (or set VITE_HOLD_MODEL_URL)
+# 2. re-check VITE_HOLD_MODEL_INPUT — freeclimbs wants 2560, the default here is 640
+# 3.
+VITE_ENABLE_HOLD_DETECTION=true npm run build
+```
+
+⚠️ The decode path is written against the standard YOLOv8 head (`[1, 4+nc, N]`, xywh in input-space pixels) but **has not been validated against real detector output** — there was no usable model to validate it with. Treat the first run as a bring-up, not a regression test.
+
+---
+
+## C5. Tests
+
+`npm test` runs both suites: **91 tests, 0 failures.**
+
+| Suite | Runner | Tests | Covers |
+|---|---|---|---|
+| `scripts/test_pose_math.mjs` | `node --test` | 25 | Pre-existing: fps detection, frame math, CSV shaping |
+| `src/services/holdAssignment.test.js` | vitest | 27 | Nearest-box assignment with synthetic landmarks and boxes |
+| `src/components/MoveForm.test.jsx` | vitest | 15 | Four hold slots, definitions, panel layout |
+| `src/components/AuthGate.test.jsx` | vitest | 8 | Sign in / sign up / validation / errors |
+| `src/components/OnboardingBanner.test.jsx` | vitest | 7 | Copy, dismissal, session-only persistence |
+| `src/utils/progress.test.js` | vitest | 9 | Progress strip counts |
+
+The assignment tests lay out a 1000×1000 frame with holds on a grid so every expectation is obvious on sight, and cover both CSV widths, the visibility floor, the distance cap, ties, and pose-less frames.
+
+**Three bugs the tests found and fixed:**
+1. `InfoTip` toggled on click while hover had already opened it — clicking the "i" made the definition vanish under the cursor. Hover and pin are now separate state.
+2. The build emitted onnxruntime-web's ~28 MB wasm as an orphan asset even with detection disabled.
+3. Node 22's partial built-in `localStorage` shadows jsdom's and has no `clear()`, which matters because a test asserts we never write there. The setup installs a complete one.
+
+`npm run build` passes. New and rewritten files lint clean; `MovesList.jsx` and `SkeletonOverlay.jsx` carry pre-existing lint errors that were not in scope.
+
+---
+
+## C6. What is NOT done
+
+- **Backend tests were not run.** They require a throwaway Postgres and their migration drops and recreates the labeling tables; the only `DATABASE_URL` to hand is the live Supabase project. `/api/config` touches no DB and was verified directly through `TestClient` (route table, definitions coverage, and that bad input is rejected before any DB access). **The holds endpoints have not been exercised against a real database** — run the backend suite against a scratch Postgres before merging.
+- **Nothing was run in a browser.** No dev server, no manual click-through. §C10 is the checklist for that.
+- **`MovesList.jsx` was not updated.** It renders moves from the list and was not part of the brief, but it reads `move.tags` in one place, which v3 removed. Worth a look during QA.
+- **The detector is unvalidated** — see §C4.
+
+---
+
+## C7. Railway
+
+`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set on
+`steadfast-vitality` / **`Data_collection_climbing`** / `production` — the
+frontend service, which serves `collect.dynalytix.net`.
+
+- Both piped through `railway variables --set-from-stdin` with `--skip-deploys`. No value was printed at any point; verified by name and length only (40 and 208 characters, matching `backend/.env`).
+- Values come from the new dedicated Supabase project (`nbqtgknayvsjkevaoeef`), not the old shared `login_system` one.
+- `VITE_API_URL` was already set and needed no change.
+- **Nothing was deployed**, and `adorable-integrity` was not touched — it still has zero `VITE_` variables and the same deployment id as before this session.
+
+---
+
+## C8. Local `.env`
+
+`data_collection/frontend/.env` was copied from the original checkout and is **not committed** (`.gitignore` covers it). Its two Supabase values were placeholders — 19 and 24 characters, left over from an earlier project — so they were replaced with the real ones from `backend/.env`. Anyone else setting this branch up locally needs to do the same, or sign-in will fail against the wrong project.
+
+---
+
+## C9. ⚠️ Merge blocker: overlap with feat/pose-extractor-v2
+
+**`feat/pose-extractor-v2` gained three commits while this branch was in flight**, after this worktree was cut from `fcd6830`:
+
+| Commit | What it does | Why it matters here |
+|---|---|---|
+| `d6b8bbc` | Widens the pose CSV to all **33** MediaPipe landmarks (75 → 147 columns), adding `*_index` fingertip and `*_foot_index` toe points | The brief's "33-landmark CSV" was right about where the repo was heading. The first 75 columns are byte-identical, so nothing here breaks. |
+| `cd75a9a` | Rounds CSV coordinates; overlay draws 15 joints | No conflict. |
+| `4eb637d` | Adds `src/services/holdMatching.js` (**tested but explicitly NOT WIRED UP**), `normalizeLandmark` in poseMath, and a migration persisting video dimensions | **Direct overlap with this branch's step 7.** |
+
+This branch could not merge that forward (the merge was blocked in this session), so instead `holdAssignment.js` was made correct against **both** CSV widths and deliberately converged onto their design:
+
+- Each slot walks a preference list — fingertip before wrist, toe before heel before ankle — so the 33-landmark CSV improves suggestions for free and the 15-landmark one still works.
+- `nearestHold` measures point-to-rectangle with 0 inside the box, matching their `distanceToBox`. They are right about why: with centre distance, a big hold the hand is resting *inside* loses to a small hold further away.
+
+**Before merging, someone must reconcile the two modules into one.** They solve the same problem:
+
+| | `holdMatching.js` (theirs) | `holdAssignment.js` (this branch) |
+|---|---|---|
+| Layer | Primitives: `distanceToBox`, `isInsideBox`, `nearestHold`, `nearestHoldsFor`, `CONTACT_LANDMARKS` | Slot policy: `suggestHoldSlots`, `reachingSide`, preference lists |
+| Wired up | No | Yes — `MoveForm` auto-suggest |
+| Units | Takes pixels + frame size, normalizes internally | Same, via `normalizedLandmark` |
+
+Recommended: **keep their primitives, keep this branch's policy layer, delete the duplicated distance code here.** The convergence above was done specifically to make that a deletion rather than a rewrite. Their `nearestHold` returns `{hold, distance, inside, index}` where this one returns the hold, so the policy layer needs a one-line adaptation.
+
+Also worth taking from their side: the **video-dimensions migration**. Auto-suggest needs the source resolution to normalize pixel landmarks, and currently bails out (suggesting nothing) when `currentVideo.width` / `.height` are absent — which is the state on this branch. **Until that migration and the field that feeds it are merged, auto-suggest will silently suggest nothing.** Manual picking is unaffected.
+
+---
+
+## C10. Cutover runbook — backend §9 and this branch, merged
+
+This supersedes §9 of `backend/REPORT.md`. The governing fact is unchanged:
+
+> `adorable-integrity` (backend) **and** `Data_collection_climbing` (frontend) both auto-deploy from **`main`**, with **Wait for CI off**. A push to `main` deploys both within seconds. There is no staging gate.
+
+**Therefore: do not merge any of these branches alone. Merge backend + pose-extractor-v2 + this branch to `main` in one go.**
+
+### Before the merge
+
+- [ ] **Reconcile `holdMatching.js` and `holdAssignment.js` into one module** (§C9). Nothing else in this list matters if two modules are computing nearest-hold differently.
+- [ ] **Merge the video-dimensions migration** and confirm `currentVideo` carries `width`/`height`, or auto-suggest stays silent (§C9).
+- [ ] Run the **backend suite against a scratch Postgres** — `TEST_DATABASE_URL=<throwaway>`. It drops and recreates the labeling tables, so never point it at production. The holds endpoints added here have not been exercised against a real database.
+- [ ] Confirm the frontend is complete against the §7 contract: bearer token on every `/api` call, JSON register, three-step presigned upload, four-slot environment, `foot_cut`/`timing`/`dyno_style`/`traction_*` gone, 307s followed. *(Done on this branch — re-verify after the merge resolves conflicts.)*
+- [ ] `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` point at the **new** project `nbqtgknayvsjkevaoeef`. *(Done — §C7.)*
+- [ ] Someone can sign in on the new Supabase project. **It has no users beyond the two `smoke-test-*@dynalytix.test` accounts** — decide whether sign-ups are open, or create the labelers' accounts by hand. Check whether email confirmation is on: if it is, `AuthGate` will say so and nobody gets in until they click the link.
+- [ ] Decide about the old data. Nothing is migrated — schema v3 starts empty by design. Old SQLite labels on the Railway disk are already lost on every redeploy; exports live in the `dynalytix-data` GitHub repo.
+- [ ] Decide on the detector (§C4): accept AGPL-3.0, find a permissive model, or leave it off. **Leaving it off is a complete product** — every hold can be placed by hand.
+
+### The merge
+
+- [ ] Merge all three branches to `main` in a single merge. Both services rebuild automatically; watch both in the Railway dashboard.
+
+### Immediately after
+
+- [ ] Unset the retired backend variables (left in place so the old build's GitHub sync kept working):
+      ```bash
+      cd data_collection/backend
+      railway variables delete GITHUB_TOKEN --service adorable-integrity --environment production --skip-deploys
+      railway variables delete DATA_REPO   --service adorable-integrity --environment production
+      ```
+- [ ] Backend health:
+      ```bash
+      curl https://adorable-integrity-production.up.railway.app/api/health
+      # expect {"status":"ok","database":"ok","r2":"ok","schema_version":3}
+      ```
+      `r2` must read `ok`, not `not configured`. `/api/config` returning 401 without a token is correct.
+- [ ] Smoke test against the deployment:
+      ```bash
+      set -a && . ./.env && set +a
+      python scripts/smoke_test.py --url https://adorable-integrity-production.up.railway.app
+      # expect 35 passed, 0 failed
+      ```
+- [ ] Truncate afterwards so smoke-test rows do not pollute the first real session:
+      ```bash
+      psql -d "$DATABASE_URL" -c "TRUNCATE frame_tags, outcomes, environments, moves, holds, videos RESTART IDENTITY CASCADE;"
+      ```
+- [ ] Walk §C11 end to end on `collect.dynalytix.net`.
+
+### Worth doing soon after
+
+- [ ] **Narrow CORS.** Both `api.py` (`allow_origins=["*"]`) and the R2 bucket rule are wide open. Tighten to `["https://collect.dynalytix.net", "http://localhost:5173"]`.
+- [ ] **Consider turning off auto-deploy from `main`,** or point production at a release branch. With Wait for CI off, any push to `main` ships straight to a live service.
+- [ ] Delete the two `smoke-test-*@dynalytix.test` users if you would rather not keep them.
+- [ ] Retire the old storage: `data/labels.db`, `data/*.csv`, `data/exports/`, `videos/`, and the `dynalytix-data` repo.
+- [ ] Rotate the R2 token if you would rather it had never passed through an agent session.
+- [ ] Update `MovesList.jsx`, which still reads the removed `move.tags` (§C6).
+
+### If it goes wrong
+
+Railway keeps previous deployments: open the service → Deployments → pick the `7be1840` build → Redeploy. That restores the old backend. Supabase and R2 are separate and unaffected by a rollback.
+
+---
+
+## C11. Manual QA — your first session as a labeler
+
+Walk this in one sitting, on a real climbing clip. Each step says what you should see, so a wrong result is obvious.
+
+**Setup**
+
+```bash
+cd data_collection/backend && uvicorn src.web.api:app --reload   # one shell
+cd data_collection/frontend && npm run dev                       # another
+```
+
+`.env` must hold the real Supabase values (§C8), or sign-in fails against the wrong project.
+
+### 1. Sign up
+- [ ] Open the app signed out. You get the **sign-in screen**, not a spinner and not a blank page.
+- [ ] Choose **Sign up**, enter an email and a password under 6 characters → it refuses locally, without a network call.
+- [ ] Sign up properly. Either you land in the app, or you are told to confirm your email — no silent nothing.
+- [ ] **Reload the page.** You stay signed in.
+- [ ] Your email and **Sign out** are in the header. Sign out, confirm you are back at the gate, sign in again.
+
+### 2. Upload
+- [ ] Pick a climbing video. Progress runs; the tab-switch warning appears.
+- [ ] When it finishes you land on the player with the **skeleton drawn over the climber**. If the skeleton is offset or shrunken, stop — that is the coordinate bug, not a UI issue.
+- [ ] The header strip reads **0 moves defined · 0 labeled · 0 tagged**.
+- [ ] The define banner reads *"Set the start frame with [, the end frame with ], then Create Move."* Dismiss it; it stays gone. Reload; it comes back (session-only, by design).
+
+### 3. Holds
+- [ ] Press **H** or click Show Holds. Detection is off by default, so expect **zero boxes** — that is correct, not a failure.
+- [ ] **Drag on the video** over a hold. A box appears and persists.
+- [ ] Add three or four more, on the holds your climber actually uses.
+- [ ] **Click a box.** It disappears. Reload the page — it stays gone.
+
+### 4. Define a move
+- [ ] Scrub to where a move starts, press **`[`**. Scrub to where it ends, press **`]`**. Markers appear on the timeline.
+- [ ] Click **Create Move**. The form opens **beside the video, not over it**.
+- [ ] **With the panel open, press `[` and `]` again, and the arrow keys.** They must still work — this is the whole point of the panel. If focus is in the Description box they correctly do not.
+
+### 5. Label it
+- [ ] All four hold slots are there: Start Left, Start Right, End, and Foot marked optional.
+- [ ] Hover an **"i"** next to a hold type. The definition appears. Try one on Confidence — it should say it is *your* confidence in the labels, not the climber's. Try Size — the size of the *movement*.
+- [ ] On Start Left, click **Pick on video**. The button activates and the video shows a hint. **Click a box** — it is assigned, and the button returns to normal. Press **Esc** during pick mode to confirm it cancels.
+- [ ] Give each of the three required slots a hold type; tick a couple of qualities.
+- [ ] Under Reach Detail the options read as sentences ("Reached it — in control"), not `Reached Not Controlled`.
+- [ ] Try **Save Move** with a required slot empty → it names the missing slot rather than failing silently.
+- [ ] Fill it in and save. The panel closes and the strip reads **1 move defined · 1 labeled · 0 tagged**.
+
+*(If the slots arrive pre-filled and marked **suggested**, auto-suggest is working. On this branch it will most likely suggest nothing, because the video-dimensions migration has not merged — see §C9. That is expected, not a bug, and manual picking is unaffected.)*
+
+### 6. Define a second move
+- [ ] Mark `[` and `]` again and open the form. **Wall angle and the hold types/qualities prefill** from the previous move; the hold assignments do **not**.
+- [ ] Save it. The strip reads **2 moves defined**.
+
+### 7. Tag
+- [ ] Pick a move from the list to enter tagging mode.
+- [ ] The banner reads *"Use the scroll bar to find the frame, then tag it."*
+- [ ] Scrub to a frame and add a sensation tag. Hover its **"i"** — the definition appears.
+- [ ] The tag shows on the timeline. The strip's **tagged** count goes up.
+- [ ] Confirm there is **no Traction Source or Traction Direction field** anywhere — removed in v3.
+
+### 8. Export and download
+- [ ] Click **Finish & Export**.
+- [ ] The modal offers **"Download the labeled CSV"** as a link, and says the link expires.
+- [ ] Click it. The CSV downloads.
+- [ ] **Open it.** Confirm your moves are there with the four hold slots, and that the pose columns are intact.
+
+### 9. The awkward cases
+- [ ] Tag a move **No Hands** → the three hand slots disappear, Foot stays. Save it; it should be accepted with empty hand slots.
+- [ ] Sign out mid-session, sign back in → you are returned to a clean upload screen, not a half-populated one.
+- [ ] Leave the app open long enough for the access token to expire (an hour), then save a move. It should **refresh and succeed**, not throw you back to the sign-in screen.
+
 # Pose Extractor v2 — Frontend Report
 
 Branch: `feat/pose-extractor-v2`, cut from `feat/supabase-r2-schema-v3` (commit `aea9920`).
