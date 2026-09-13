@@ -69,6 +69,98 @@ The labeling tables were truncated afterwards, so the database is empty.
 
 ---
 
+## ✅ Third update — R2 is live and verified
+
+R2 was set up through the Cloudflare dashboard (browser-driven, with the account
+owner signing in). Everything in steps 1 and 2 now passes.
+
+**Resources created**
+
+- **Bucket** `dynalytix-climbing` — Automatic location, resolved to Eastern
+  North America (same region as the Supabase project and Railway). Public
+  access **disabled**: all reads and writes go through presigned URLs.
+- **Account API token** `dynalytix-climbing-backend` — permission **Object Read
+  & Write**, scoped to that one bucket, TTL forever, no IP filter (Railway
+  egress IPs are not static). Account-level rather than user-level, which is
+  what Cloudflare recommends for production since it survives user changes.
+- `.env` filled in: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+  `R2_BUCKET`. File is `chmod 600` and gitignored. No value appears in this
+  report or any commit.
+
+**Step 1 — object operations against the real bucket**
+
+```
+Verifying R2 bucket "dynalytix-climbing" at https://<account>.r2.cloudflarestorage.com
+
+direct object operations
+  PASS  put_object uploads
+  PASS  object_exists finds it
+  PASS  object_exists is False for a missing key
+  PASS  get_object_stream round-trips the bytes
+  PASS  missing key raises FileNotFoundError
+
+presigned URLs (plain HTTP, no credentials)
+  PASS  presigned_put_url returns a URL
+  PASS  PUT to the presigned URL succeeds
+  PASS  object landed in the bucket
+  PASS  GET from the presigned URL succeeds
+  PASS  presigned GET returns the same bytes
+
+10 passed, 0 failed
+```
+
+The presigned PUT and GET were also exercised with `curl` directly, outside the
+Python client, to confirm a browser can use them unaided:
+
+```
+=== curl PUT to presigned URL ===
+http=200 uploaded=35B
+=== curl GET from presigned URL ===
+frame_number,timestamp_ms
+0,0
+1,33
+http=200
+```
+
+**Step 2 — CORS**
+
+Applied through the dashboard (R2 → bucket → Settings → CORS Policy) and
+confirmed by the read-back table there:
+
+| Allowed Origins | Allowed Methods | Allowed Headers |
+|---|---|---|
+| `*` | `GET`, `PUT`, `HEAD` | `Content-Type`, `Content-Length` |
+
+`AllowedOrigins` is `*` because that is literally what `api.py` sets
+(`allow_origins=["*"]`), which already subsumes `http://localhost:5173`.
+Now that the frontend origin is known, narrowing both `api.py` and this rule to
+`["https://collect.dynalytix.net", "http://localhost:5173"]` is worth doing —
+say the word.
+
+`PutBucketCors`/`GetBucketCors` over the S3 API return **AccessDenied** with this
+token, which is correct and intentional: bucket configuration is an admin-scoped
+operation and the production token is deliberately object-scoped. `verify_r2.py`
+now reports that as an expected skip rather than a failure, and points at the
+dashboard. To manage CORS over the API instead, create a separate Admin Read &
+Write token.
+
+**One diagnostic worth keeping**
+
+The first attempts failed with `SSL: SSLV3_ALERT_HANDSHAKE_FAILURE` against
+`*.r2.cloudflarestorage.com`, from curl and Chrome alike, while
+`dash.cloudflare.com`, AWS S3 and Google Cloud Storage all responded normally —
+the endpoint for a freshly created account takes a few minutes to start serving
+TLS. It resolved on its own. `verify_r2.py` now does a TLS preflight and
+explains this instead of surfacing a bare `SSLError` from inside botocore.
+
+**Still outstanding: Railway.** The CLI is linked to
+`steadfast-vitality` / `adorable-integrity` / `production`, and every variable
+value now exists. Steps 3-6 were not run — see the deploy warning in §9 step 5:
+that service is live on the old build behind `collect.dynalytix.net`, and this
+branch breaks the current frontend until Terminal C ships the §7 changes.
+
+---
+
 ## ⛔ Second update — R2 and Railway are still not available
 
 A follow-up pass was requested on the premise that R2 credentials were in
@@ -564,7 +656,7 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 |---|---|---|
 | 3 — `supabase db push` | **DONE** | Applied to the new dedicated project `dynalytix-climbing`. |
 | 3 — verify tables via psql against `DATABASE_URL` | **DONE** | Against the live database: 7 tables, RLS on all, 4 policies each, `schema_version = 3`. |
-| 4 — R2 bucket + CORS | **Still blocked** | The four `R2_*` keys in `.env` are empty strings. Implemented as `scripts/verify_r2.py` (S3 `PutBucketCors`, no wrangler needed) — one command once credentials exist. |
+| 4 — R2 bucket + CORS | **DONE** | Bucket and object-scoped token created; 10/10 object checks pass, presigned PUT/GET confirmed with curl; CORS applied and read back in the dashboard. |
 | 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
 | 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
 | 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
@@ -585,21 +677,17 @@ In order:
 
 ~~2. Add `DATABASE_URL` to `.env`.~~ **Done** — points at the transaction pooler.
 
-3. **R2 — still blocked, nothing supplied yet.** The four `R2_*` keys exist in
-   `.env` but are all **empty strings**. Create a Cloudflare R2 bucket and an
-   API token (R2 → Manage R2 API Tokens → Object Read & Write), fill the four
-   values in, then run:
+3. ~~R2 bucket, token and CORS.~~ **Done** — bucket `dynalytix-climbing`,
+   object-scoped account token, CORS applied. Re-verify any time with:
    ```bash
    cd data_collection/backend
    set -a && . ./.env && set +a
    python scripts/verify_r2.py
    ```
-   That one command does both of the R2 steps: it exercises `put_object`,
-   `object_exists`, `get_object_stream`, a real credential-free HTTP PUT to a
-   presigned URL and a presigned GET, then applies `r2-cors.json` with
-   `PutBucketCors` and reads it back with `GetBucketCors`, asserting PUT, GET
-   and `http://localhost:5173` are permitted. It cleans up after itself. It
-   uses the S3 API rather than wrangler, which is still not installed.
+   It exercises `put_object`, `object_exists`, `get_object_stream`, a real
+   credential-free HTTP PUT to a presigned URL and a presigned GET, cleaning up
+   after itself. The CORS step reports an expected skip, since the production
+   token cannot change bucket configuration by design.
 4. ~~Run the suite for real.~~ **Done** — 61 passed against the live database.
    Note for future runs: the suite re-applies the migration, which **drops and
    recreates** the labeling tables. That was safe on an empty project. Once real

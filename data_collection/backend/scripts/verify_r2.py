@@ -23,8 +23,11 @@ the environment. Never prints a credential.
 import argparse
 import json
 import pathlib
+import socket
+import ssl
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -36,6 +39,27 @@ CORS_FILE = pathlib.Path(__file__).resolve().parents[1] / 'r2-cors.json'
 
 passed = 0
 failed = 0
+
+
+def endpoint_reachable(endpoint: str, timeout: int = 12):
+    """TLS-handshake check against the endpoint host.
+
+    Distinguishes "the network will not let us talk to R2 at all" from a real
+    credential or permission error, which otherwise surfaces as a bare
+    SSLError deep inside botocore.
+    """
+    host = urllib.parse.urlparse(endpoint).hostname
+    port = urllib.parse.urlparse(endpoint).port or 443
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+                return True, ''
+    except ssl.SSLError as exc:
+        return False, f'TLS handshake rejected ({exc.reason or exc})'
+    except (socket.timeout, TimeoutError):
+        return False, 'connection timed out'
+    except OSError as exc:
+        return False, f'{type(exc).__name__}: {exc}'
 
 
 def check(label: str, condition: bool, detail: str = ''):
@@ -76,7 +100,21 @@ def main():
         )
 
     bucket = r2.bucket_name()
-    print(f'Verifying R2 bucket "{bucket}" at {r2.endpoint_url()}\n')
+    endpoint = r2.endpoint_url()
+    print(f'Verifying R2 bucket "{bucket}" at {endpoint}\n')
+
+    reachable, why = endpoint_reachable(endpoint)
+    if not reachable:
+        sys.exit(
+            f'Cannot reach {endpoint}: {why}\n\n'
+            'The credentials may be fine - this is a network-level failure before\n'
+            'any request is signed. Some networks block Cloudflare\'s S3 API domain\n'
+            '(*.r2.cloudflarestorage.com) while leaving dash.cloudflare.com reachable.\n'
+            'Check with:\n'
+            f'    curl -sv https://{urllib.parse.urlparse(endpoint).hostname}/ 2>&1 | tail -5\n'
+            'If that fails too, run this from another network (phone hotspot or VPN),\n'
+            'or rely on the deployed service, which reaches R2 from its own network.'
+        )
 
     run_id = uuid.uuid4().hex[:12]
     direct_key = f'_verify/{run_id}/direct.csv'
@@ -146,11 +184,26 @@ def main():
     # --- 6/7. CORS ----------------------------------------------------------
     if not args.skip_cors:
         print('\nCORS')
+        rules = json.loads(CORS_FILE.read_text())
         try:
-            rules = json.loads(CORS_FILE.read_text())
             r2.put_bucket_cors(rules)
             check('put_bucket_cors applied', True)
+        except Exception as exc:
+            if 'AccessDenied' in str(exc):
+                # Expected: bucket configuration is an admin-scoped operation,
+                # and the production token is deliberately Object Read & Write
+                # only. CORS is managed in the dashboard, or with a separate
+                # admin token. Not a failure.
+                print('  SKIP  bucket CORS is not writable by this token')
+                print('        (Object Read & Write cannot change bucket config -')
+                print('         that is the intended least-privilege posture.)')
+                print('        Manage CORS at: R2 > bucket > Settings > CORS Policy,')
+                print('        or re-run with an Admin Read & Write token.')
+                return summarize()
+            check('CORS configuration', False, f'{type(exc).__name__}: {exc}')
+            return summarize()
 
+        try:
             applied = r2.get_bucket_cors()
             check('get_bucket_cors returns a rule', bool(applied), str(applied))
 
@@ -167,7 +220,7 @@ def main():
                       str(sorted(origins)))
                 print(f'  applied rules: {json.dumps(applied, default=str)}')
         except Exception as exc:
-            check('CORS configuration', False, f'{type(exc).__name__}: {exc}')
+            check('get_bucket_cors', False, f'{type(exc).__name__}: {exc}')
 
     # --- cleanup ------------------------------------------------------------
     if not args.keep:
