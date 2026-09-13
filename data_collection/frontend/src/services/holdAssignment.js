@@ -1,41 +1,47 @@
 /**
- * Auto-suggesting which hold goes in which slot, from the pose CSV.
+ * Suggesting which hold belongs in each of MoveForm's four slots.
  *
- * At the move's start frame the hands are on their starting holds; at the end
- * frame the reaching hand is on the target. So:
+ * This is a **policy layer only**. Every coordinate decision — the
+ * pixel→normalized conversion, point-to-box distance, "which box is nearest" —
+ * belongs to `holdMatching.js`, which is the single source of geometry. Row
+ * parsing belongs to `holdSuggestions.js`. Nothing here does arithmetic on a
+ * coordinate; if a suggestion lands in the wrong place, the bug is in the
+ * inputs or in holdMatching, never in this file.
  *
- *   start_left   ← box nearest the left wrist  at frame_start
- *   start_right  ← box nearest the right wrist at frame_start
- *   end          ← box nearest the reaching wrist at frame_end
- *   foot         ← box nearest either foot point at frame_start
+ * What it *does* own is the slot policy, which is specific to defining a move
+ * and has no equivalent on the tagging side:
  *
- * Landmark contract. This works against BOTH widths of the pose CSV, because
- * the two exist side by side right now:
+ *   start_left   ← the left hand at the move's start frame
+ *   start_right  ← the right hand at the move's start frame
+ *   end          ← the reaching hand at the move's end frame
+ *   foot         ← a foot at the start frame
  *
- *   - the 15-landmark CSV this branch was cut from — wrists, heels, ankles,
- *     and no fingertip or toe;
- *   - the 33-landmark CSV that landed on feat/pose-extractor-v2 while this
- *     branch was in flight, which adds `*_index` fingertip and toe points.
- *
- * So each slot walks a preference list and takes the first point that is
- * actually present and visible: fingertip before wrist, toe before heel before
- * ankle. A fingertip sits much closer to the hold the climber is really on, so
- * when the 33-landmark CSV is in play the suggestions get better for free, and
- * nothing breaks when it is not.
- *
- * ⚠️ See REPORT.md §C9: feat/pose-extractor-v2 also gained
- * `src/services/holdMatching.js`, a tested-but-unwired primitives module that
- * overlaps this one. These need reconciling into a single module at merge —
- * the distance function here was deliberately converged onto theirs to make
- * that a deletion rather than a rewrite.
- *
- * Everything in this module is pure: plain objects in, plain objects out, no
- * DOM and no store. That is what makes it directly testable.
+ * and the landmark preference lists that make it work across both widths of
+ * the pose CSV: fingertip before wrist, toe before heel before ankle. The
+ * 33-landmark CSV has `*_index` and `*_foot_index`; the 15-landmark one it
+ * replaced had only wrists, heels and ankles. Taking the first point that is
+ * actually present means the newer CSV improves suggestions for free without
+ * the older one breaking.
  */
+import { nearestHold } from './holdMatching.js';
+import { landmarkFromRow } from './holdSuggestions.js';
+import { normalizeLandmark } from './poseMath.js';
+
+/**
+ * How close a landmark must be to a box to be worth suggesting, in normalized
+ * units. Deliberately looser than holdSuggestions' CONTACT_THRESHOLD (0.04):
+ * that answers "is the climber touching this hold right now", which wants to be
+ * strict, while this answers "which hold is this move about", where a
+ * near-miss is still the right hold and the labeller confirms it anyway.
+ */
+export const SUGGEST_THRESHOLD = 0.15;
+
+/** Minimum MediaPipe visibility before a landmark is trusted for a suggestion. */
+export const MIN_VISIBILITY = 0.5;
 
 /**
  * Foot landmarks, best first: toe, then heel, then ankle.
- * `*_foot_index` exists only in the 33-landmark CSV — see the header.
+ * `*_foot_index` exists only in the 33-landmark CSV.
  */
 export const FOOT_POINTS = [
   'left_foot_index',
@@ -48,7 +54,7 @@ export const FOOT_POINTS = [
 
 /**
  * Hand landmarks for one side, best first. The fingertip (`*_index`) is what
- * actually contacts the hold; the wrist is up to a hand's width away from it,
+ * actually contacts the hold; the wrist trails up to a hand's width behind it,
  * so it is the fallback rather than the first choice.
  */
 export function handPoints(side) {
@@ -56,117 +62,42 @@ export function handPoints(side) {
 }
 
 /**
- * First point in a preference list that is present and visible enough.
- * @returns {{x:number,y:number}|null} normalized
+ * First landmark in a preference list that is present and visible enough.
+ *
+ * Returns it in **pixel** space, exactly as it sits in the CSV — normalization
+ * is holdMatching's job, and doing it here would be the duplication this
+ * module exists to avoid.
+ *
+ * @returns {{x:number,y:number,visibility:number|null}|null}
  */
-export function firstVisiblePoint(row, names, frameSize) {
+export function firstVisibleLandmark(row, names, minVisibility = MIN_VISIBILITY) {
   for (const name of names) {
-    const point = normalizedLandmark(row, name, frameSize);
-    if (point) return point;
+    const lm = landmarkFromRow(row, name);
+    if (!lm) continue;
+    // A null visibility means the column is absent rather than low — trust it.
+    if (lm.visibility !== null && lm.visibility < minVisibility) continue;
+    return lm;
   }
   return null;
 }
 
-/** Minimum MediaPipe visibility before a landmark is trusted for a suggestion. */
-export const MIN_VISIBILITY = 0.5;
-
 /**
- * Read one landmark from a parsed CSV row.
+ * Which hand is doing the reaching: the one that travels further between the
+ * start and end frames.
  *
- * Rows come from the CSV as strings. Coordinates are **pixels in the original
- * video resolution**, so they must be normalized against the frame size before
- * being compared with a hold's 0-1 box.
- *
- * @returns {{x:number,y:number,visibility:number}|null}
- */
-export function landmarkFromRow(row, name) {
-  if (!row) return null;
-  const x = Number(row[`landmark_${name}_x`]);
-  const y = Number(row[`landmark_${name}_y`]);
-  const rawVis = row[`landmark_${name}_visibility`];
-  const visibility = rawVis === '' || rawVis == null ? 0 : Number(rawVis);
-
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x, y, visibility: Number.isFinite(visibility) ? visibility : 0 };
-}
-
-/**
- * Landmark in normalized 0-1 space, or null when absent or too uncertain.
- *
- * @param {object} row - parsed CSV row
- * @param {string} name - landmark name, e.g. 'left_wrist'
- * @param {{width:number,height:number}} frameSize - original video resolution
- */
-export function normalizedLandmark(row, name, frameSize) {
-  const lm = landmarkFromRow(row, name);
-  if (!lm) return null;
-  if (lm.visibility < MIN_VISIBILITY) return null;
-  if (!frameSize?.width || !frameSize?.height) return null;
-  return { x: lm.x / frameSize.width, y: lm.y / frameSize.height };
-}
-
-/** Centre of a normalized hold box. */
-export function boxCenter(hold) {
-  return { x: hold.bbox_x + hold.bbox_w / 2, y: hold.bbox_y + hold.bbox_h / 2 };
-}
-
-/**
- * Shortest distance from a normalized point to a hold box; 0 when inside.
- *
- * Point-to-rectangle rather than point-to-centre, deliberately: with centre
- * distance a big hold the hand is resting *inside* can lose to a small hold
- * further away, which is exactly backwards.
- */
-export function distanceToBox(point, hold) {
-  const right = hold.bbox_x + hold.bbox_w;
-  const bottom = hold.bbox_y + hold.bbox_h;
-  const dx = Math.max(hold.bbox_x - point.x, 0, point.x - right);
-  const dy = Math.max(hold.bbox_y - point.y, 0, point.y - bottom);
-  return Math.hypot(dx, dy);
-}
-
-/**
- * The hold whose centre is closest to a normalized point.
- *
- * `maxDistance` guards against assigning a hold on the far side of the wall
- * when the real one was never detected — better to suggest nothing than to
- * suggest something wrong, since a wrong suggestion still has to be noticed and
- * undone.
- *
- * @returns {object|null} the hold, or null
- */
-export function nearestHold(holds, point, maxDistance = 0.15) {
-  if (!point || !Array.isArray(holds) || holds.length === 0) return null;
-
-  let best = null;
-  let bestDistance = Infinity;
-
-  for (const hold of holds) {
-    const distance = distanceToBox(point, hold);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = hold;
-    }
-  }
-
-  if (best === null || bestDistance > maxDistance) return null;
-  return best;
-}
-
-/**
- * Which wrist is doing the reaching.
- *
- * The reaching hand is the one that travels furthest between the start and end
- * frames. Ties and missing landmarks fall back to null, which makes the `end`
- * slot simply go unsuggested.
+ * No box is involved, so this is the one comparison nearestHold cannot do for
+ * us — but it still has to be scale-correct on a non-square frame, so both
+ * points go through poseMath's `normalizeLandmark`, the same primitive
+ * holdMatching itself uses. A tie, or a hand that cannot be measured on both
+ * frames, returns null and the `end` slot simply goes unsuggested.
  *
  * @returns {'left'|'right'|null}
  */
-export function reachingSide(startRow, endRow, frameSize) {
+export function reachingSide(startRow, endRow, width, height) {
   const travel = (side) => {
     const names = handPoints(side);
-    const a = firstVisiblePoint(startRow, names, frameSize);
-    const b = firstVisiblePoint(endRow, names, frameSize);
+    const a = normalizeLandmark(firstVisibleLandmark(startRow, names), width, height);
+    const b = normalizeLandmark(firstVisibleLandmark(endRow, names), width, height);
     if (!a || !b) return null;
     return Math.hypot(b.x - a.x, b.y - a.y);
   };
@@ -174,57 +105,63 @@ export function reachingSide(startRow, endRow, frameSize) {
   const left = travel('left');
   const right = travel('right');
 
-  if (left == null && right == null) return null;
-  if (left == null) return 'right';
-  if (right == null) return 'left';
+  if (left === null && right === null) return null;
+  if (left === null) return 'right';
+  if (right === null) return 'left';
   if (left === right) return null;
   return left > right ? 'left' : 'right';
 }
 
 /**
- * Suggest a hold for each of the four slots.
+ * Suggest a hold id for each of the four slots.
+ *
+ * Every match is delegated to `holdMatching.nearestHold`, which takes pixel
+ * landmarks plus the frame size and refuses (returns null) when the size is
+ * unknown rather than guessing — so a pre-migration video with no width/height
+ * suggests nothing at all, which is the correct behaviour.
  *
  * @param {object} params
- * @param {Array} params.holds - holds with normalized bbox_* fields
- * @param {object} params.startRow - parsed CSV row at the move's start frame
- * @param {object} params.endRow - parsed CSV row at the move's end frame
- * @param {{width:number,height:number}} params.frameSize - original resolution
- * @param {number} [params.maxDistance]
+ * @param {Array} params.holds holds with normalized bbox_* fields
+ * @param {object} params.startRow parsed CSV row at the move's start frame
+ * @param {object} params.endRow parsed CSV row at the move's end frame
+ * @param {number} params.width intrinsic video width in pixels
+ * @param {number} params.height intrinsic video height in pixels
+ * @param {number} [params.threshold] normalized max distance
  * @returns {{start_left:?number, start_right:?number, end:?number, foot:?number}}
  *          hold ids, null where nothing was close enough to suggest
  */
-export function suggestHoldSlots({ holds, startRow, endRow, frameSize, maxDistance = 0.15 }) {
+export function suggestHoldSlots({
+  holds,
+  startRow,
+  endRow,
+  width,
+  height,
+  threshold = SUGGEST_THRESHOLD,
+  minVisibility = MIN_VISIBILITY,
+}) {
   const suggestion = { start_left: null, start_right: null, end: null, foot: null };
-  if (!Array.isArray(holds) || holds.length === 0) return suggestion;
+  if (!holds?.length) return suggestion;
 
-  const idOf = (hold) => (hold ? hold.id : null);
+  const match = (row, names) => {
+    const lm = firstVisibleLandmark(row, names, minVisibility);
+    const hit = nearestHold(lm, holds, width, height, { maxDistance: threshold });
+    return hit ? hit.hold.id : null;
+  };
 
-  // Hands at the start frame — fingertip if the CSV has one, else the wrist.
-  suggestion.start_left = idOf(
-    nearestHold(holds, firstVisiblePoint(startRow, handPoints('left'), frameSize), maxDistance)
-  );
-  suggestion.start_right = idOf(
-    nearestHold(holds, firstVisiblePoint(startRow, handPoints('right'), frameSize), maxDistance)
-  );
+  // Hands at the start frame.
+  suggestion.start_left = match(startRow, handPoints('left'));
+  suggestion.start_right = match(startRow, handPoints('right'));
 
   // The reaching hand at the end frame.
-  const side = reachingSide(startRow, endRow, frameSize);
-  if (side) {
-    suggestion.end = idOf(
-      nearestHold(holds, firstVisiblePoint(endRow, handPoints(side), frameSize), maxDistance)
-    );
-  }
+  const side = reachingSide(startRow, endRow, width, height);
+  if (side) suggestion.end = match(endRow, handPoints(side));
 
-  // The foot. First foot point that is both visible and close to a box wins,
-  // in preference order: toe, then heel, then ankle.
+  // The foot: first foot point that is both visible and close to a box wins,
+  // in preference order.
   for (const name of FOOT_POINTS) {
-    const hold = nearestHold(
-      holds,
-      normalizedLandmark(startRow, name, frameSize),
-      maxDistance
-    );
-    if (hold) {
-      suggestion.foot = hold.id;
+    const id = match(startRow, [name]);
+    if (id !== null) {
+      suggestion.foot = id;
       break;
     }
   }

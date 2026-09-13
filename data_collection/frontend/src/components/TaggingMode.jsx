@@ -13,7 +13,9 @@ import {
   getFrameTags,
   createFrameTag,
   deleteFrameTag,
+  getHolds,
 } from '../api/client';
+import HoldSuggestions from './HoldSuggestions';
 import { exportVideo } from '../api/ExportService';
 import ThankYouModal from './ThankYouModal';
 import DoneButton from './DoneButton';
@@ -86,6 +88,7 @@ function TaggingMode() {
     setMode,
     setCurrentMove,
     config: storeConfig,
+    setHolds,
   } = useStore();
 
   const [config, setConfigState] = useState(null);
@@ -103,6 +106,48 @@ function TaggingMode() {
   const [configError, setConfigError] = useState(null);
 
   const fps = fpsOf(currentVideo);
+
+  // Holds for the auto-suggest panel. Best-effort: a failure here must not
+  // block tagging, which works perfectly well without suggestions.
+  useEffect(() => {
+    if (!currentVideo?.id) return;
+    let cancelled = false;
+    getHolds(currentVideo.id)
+      .then((data) => {
+        if (!cancelled) setHolds(data);
+      })
+      .catch((err) => {
+        console.warn('[TaggingMode] Could not load holds; suggestions disabled.', err);
+        if (!cancelled) setHolds([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentVideo?.id, setHolds]);
+
+  /**
+   * Apply an auto-suggestion to the tag form.
+   *
+   * Additive on body parts, so accepting two suggestions in a row keeps both,
+   * and it only fills `side` when the contacts agree on one — a tag carries a
+   * single side, so "both hands" must leave it to the labeller.
+   */
+  const handleApplySuggestion = (contacts) => {
+    if (!contacts?.length) return;
+
+    setSelectedLocations((prev) => {
+      const next = new Set(prev);
+      for (const c of contacts) next.add(c.bodyPart);
+      return [...next];
+    });
+
+    const sides = new Set(contacts.map((c) => c.side));
+    if (sides.size === 1) setSide([...sides][0]);
+
+    // Suggestions are only actionable once a tag type is chosen; opening the
+    // form here would guess at the tag type, which is the labeller's call.
+    setError(null);
+  };
 
   // Config comes from the store — App loads it once, after sign-in. Fetching it
   // again here would duplicate the request and could disagree with what the
@@ -430,7 +475,7 @@ function TaggingMode() {
             <span>
               Move Frame: {currentMoveFrame} / {moveFrameCount}
             </span>
-            <span>({(currentFrame / fps).toFixed(2)}s)</span>
+            <span>({frameToTime(currentFrame, fps).toFixed(2)}s)</span>
             {tagsOnCurrentFrame.length > 0 && (
               <span className="tags-on-frame">
                 {tagsOnCurrentFrame.length} tag
@@ -472,6 +517,9 @@ function TaggingMode() {
         {/* Tag Controls Section */}
         <div className="tagging-controls-section">
           <h3>Add Tag at Frame {currentFrame}</h3>
+
+          {/* Auto-suggest: which holds the climber is on at this frame */}
+          <HoldSuggestions onApply={handleApplySuggestion} />
 
           {/* Tag Type Buttons - from config */}
           <div className="tag-buttons-grid">

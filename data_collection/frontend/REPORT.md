@@ -74,7 +74,7 @@ Read from `App.jsx`, `store/useStore.js`, `api/client.js`, `api/auth.js`,
 | `src/components/ProgressStrip.jsx` | Persistent "{n} defined · {m} labeled · {k} tagged" header with Save & Next Move and Finish & Export. |
 | `src/components/HoldOverlay.jsx` | Hold boxes over the video: drag to add, click to delete, and a pick mode for assigning a box to a form slot. |
 | `src/services/holdDetector.js` | YOLOv8n / onnxruntime-web detection. **Off by default, no weights bundled** — see §C4. |
-| `src/services/holdAssignment.js` | Pure nearest-box suggestion from the pose CSV. |
+| `src/services/holdAssignment.js` | The four-slot suggestion **policy** for MoveForm. A thin adapter over `holdMatching` — no geometry of its own (§C9). |
 | `src/utils/taxonomy.js` | `optionLabel` / `optionDescription` — reads `display_label` and definitions out of config. |
 | `src/utils/progress.js` | `progressCounts`, the defined/labeled/tagged arithmetic. |
 | `src/test/setup.js`, `vitest.config.js` | DOM test environment. |
@@ -98,13 +98,24 @@ Read from `App.jsx`, `store/useStore.js`, `api/client.js`, `api/auth.js`,
 | `vite.config.js` | Marks `onnxruntime-web` external when detection is off — see §C4. |
 | `package.json` | Added `onnxruntime-web`; vitest + testing-library + jsdom. `npm test` now runs both suites. |
 
-### Backend (only the three areas the brief allowed)
+### From the merge with feat/pose-extractor-v2
+
+Kept unchanged from B: `src/services/holdMatching.js`, `src/services/holdSuggestions.js`,
+`src/components/HoldSuggestions.jsx`, `src/services/poseMath.js` (33 landmarks, rounding,
+`normalizeLandmark`), `scripts/fixtures/golden_pose.csv`, `scripts/golden_frames.mjs`,
+`scripts/make_golden.mjs`, `src/components/SkeletonOverlay.jsx`, and the
+`20260913180000_add_video_dimensions.sql` migration. Hand-merged:
+`TaggingMode.jsx`, `VideoUpload.jsx`, `client.js`, `useStore.js`, `App.css`,
+`package.json` — see §C9.
+
+### Backend (only the three areas the brief allowed, plus the merge)
 
 | File | Change |
 |---|---|
 | `src/labeling/models.py` | `DEFINITIONS` — plain-language descriptions for all 11 taxonomies, plus `display_label` on `reach_details`. |
 | `src/web/api.py` | `/api/config` serves `definitions`. New `POST /api/videos/{id}/holds` (bulk, capped at 200) and `PUT /api/holds/{id}`. New `HoldItem` / `HoldBulkCreate` / `HoldUpdate` schemas. |
-| `src/labeling/database.py` | `create_holds_bulk` (one transaction) and `update_hold` (box and source only — `video_id`/`user_id` are fixed at creation). |
+| `src/labeling/database.py` | `create_holds_bulk` (one transaction) and `update_hold` (box and source only — `video_id`/`user_id` are fixed at creation). From B: `width`/`height` on videos, and `apply_schema_sql` applying **all** migrations rather than just the base schema. |
+| `scripts/auth_shim.sql`, `scripts/setup_test_db.sh` | **New.** The `auth.uid()`/`auth.role()` shim and scratch-database builder the test suite needs on a plain Postgres (§C5). |
 
 ---
 
@@ -175,23 +186,54 @@ VITE_ENABLE_HOLD_DETECTION=true npm run build
 
 ## C5. Tests
 
-`npm test` runs both suites: **91 tests, 0 failures.**
+**197 tests, 0 failures** across both branches' suites, unioned.
+
+### Frontend — `npm test`, 125 tests
 
 | Suite | Runner | Tests | Covers |
 |---|---|---|---|
-| `scripts/test_pose_math.mjs` | `node --test` | 25 | Pre-existing: fps detection, frame math, CSV shaping |
-| `src/services/holdAssignment.test.js` | vitest | 27 | Nearest-box assignment with synthetic landmarks and boxes |
+| `scripts/test_pose_math.mjs` | `node --test` | 61 | fps detection, frame math, CSV shaping, the 33-landmark widening and its golden file, rounding, and the `holdMatching` geometry (normalization, point-to-rectangle distance, containment, `maxDistance`, the divergence test) |
+| `src/services/holdAssignment.test.js` | vitest | 25 | The four-slot policy: preference lists, reaching side, thresholds, both CSV widths, resolution independence |
 | `src/components/MoveForm.test.jsx` | vitest | 15 | Four hold slots, definitions, panel layout |
 | `src/components/AuthGate.test.jsx` | vitest | 8 | Sign in / sign up / validation / errors |
 | `src/components/OnboardingBanner.test.jsx` | vitest | 7 | Copy, dismissal, session-only persistence |
 | `src/utils/progress.test.js` | vitest | 9 | Progress strip counts |
 
-The assignment tests lay out a 1000×1000 frame with holds on a grid so every expectation is obvious on sight, and cover both CSV widths, the visibility floor, the distance cap, ties, and pose-less frames.
+125 = C's 91 + B's 36 new pose-math tests − **2 genuine duplicates**. The two
+removed were `holdAssignment`'s own `boxCenter` / `distanceToBox` geometry
+tests: that geometry now lives in `holdMatching` and is covered by B's suite,
+so re-testing it here would have been testing a re-export. Everything policy-
+shaped in that file was kept and extended.
 
-**Three bugs the tests found and fixed:**
+### Backend — `pytest`, 72 tests
+
+Run against a **throwaway local Postgres**, never the live Supabase project —
+the v3 migration DROPs and recreates the labeling tables. 61 pre-existing plus
+**11 new** covering the endpoints this branch added and §C6 previously flagged
+as unverified: bulk create ordering, empty batch, all-or-nothing on a bad box,
+the 200 cap, out-of-frame rejection, owner scoping, and PUT (partial update,
+no-op, bad source, cross-user 404, missing 404).
+
+Plain Postgres has no `auth` schema, so the RLS policies cannot even be
+created. `scripts/auth_shim.sql` supplies `auth.uid()` and `auth.role()` reading
+the same session GUCs Supabase uses, and `scripts/setup_test_db.sh` builds the
+database and prints its DSN:
+
+```bash
+cd data_collection/backend
+TEST_DATABASE_URL="$(./scripts/setup_test_db.sh)" python3 -m pytest tests/ -q
+```
+
+The script refuses any database name that looks hosted, and the shim is marked
+test-fixture-only — applying it to the real project would shadow Supabase's own
+auth schema.
+
+### Bugs the tests found and fixed
+
 1. `InfoTip` toggled on click while hover had already opened it — clicking the "i" made the definition vanish under the cursor. Hover and pin are now separate state.
 2. The build emitted onnxruntime-web's ~28 MB wasm as an orphan asset even with detection disabled.
 3. Node 22's partial built-in `localStorage` shadows jsdom's and has no `clear()`, which matters because a test asserts we never write there. The setup installs a complete one.
+4. **From the merge:** git silently combined both branches' holds additions in `client.js` and `useStore.js` into duplicate definitions, and dropped a closing brace in `App.css`. Lint and the build caught all three — see §C9.
 
 `npm run build` passes. New and rewritten files lint clean; `MovesList.jsx` and `SkeletonOverlay.jsx` carry pre-existing lint errors that were not in scope.
 
@@ -199,9 +241,10 @@ The assignment tests lay out a 1000×1000 frame with holds on a grid so every ex
 
 ## C6. What is NOT done
 
-- **Backend tests were not run.** They require a throwaway Postgres and their migration drops and recreates the labeling tables; the only `DATABASE_URL` to hand is the live Supabase project. `/api/config` touches no DB and was verified directly through `TestClient` (route table, definitions coverage, and that bad input is rejected before any DB access). **The holds endpoints have not been exercised against a real database** — run the backend suite against a scratch Postgres before merging.
+- ~~Backend tests were not run.~~ **Done.** 72 tests pass against a throwaway local Postgres, including 11 new ones covering the bulk-create and update hold endpoints. See §C5 for how to reproduce.
 - **Nothing was run in a browser.** No dev server, no manual click-through. §C10 is the checklist for that.
 - **`MovesList.jsx` was not updated.** It renders moves from the list and was not part of the brief, but it reads `move.tags` in one place, which v3 removed. Worth a look during QA.
+- **Hold *creation* is still only manual.** Detection ships off (§C4), so `HoldSuggestions` and MoveForm auto-suggest both have nothing to work with until a labeller draws boxes by hand. That is a complete flow, not a gap — but it does mean the "Holds in use" panel reads "No holds recorded" on a fresh video until someone marks one.
 - **The detector is unvalidated** — see §C4.
 
 ---
@@ -225,34 +268,99 @@ frontend service, which serves `collect.dynalytix.net`.
 
 ---
 
-## C9. ⚠️ Merge blocker: overlap with feat/pose-extractor-v2
+## C9. ✅ Resolved: merged with feat/pose-extractor-v2
 
-**`feat/pose-extractor-v2` gained three commits while this branch was in flight**, after this worktree was cut from `fcd6830`:
+`feat/pose-extractor-v2` (`4046982`) is **merged into this branch**. The overlap
+this section previously flagged as a merge blocker is gone: there is now one
+geometry module, one set of hold UI surfaces, and one test suite.
 
-| Commit | What it does | Why it matters here |
-|---|---|---|
-| `d6b8bbc` | Widens the pose CSV to all **33** MediaPipe landmarks (75 → 147 columns), adding `*_index` fingertip and `*_foot_index` toe points | The brief's "33-landmark CSV" was right about where the repo was heading. The first 75 columns are byte-identical, so nothing here breaks. |
-| `cd75a9a` | Rounds CSV coordinates; overlay draws 15 joints | No conflict. |
-| `4eb637d` | Adds `src/services/holdMatching.js` (**tested but explicitly NOT WIRED UP**), `normalizeLandmark` in poseMath, and a migration persisting video dimensions | **Direct overlap with this branch's step 7.** |
+### What arrived from B
 
-This branch could not merge that forward (the merge was blocked in this session), so instead `holdAssignment.js` was made correct against **both** CSV widths and deliberately converged onto their design:
+| Commit | What it does |
+|---|---|
+| `d6b8bbc` | Pose CSV widened to all **33** MediaPipe landmarks (75 → 147 columns), adding `*_index` fingertip and `*_foot_index` toe points. First 75 columns byte-identical. |
+| `cd75a9a` | CSV coordinates rounded (4dp landmarks, 3dp visibility); overlay draws only the 15 body joints. |
+| `4eb637d` | `holdMatching.js` geometry primitives, `normalizeLandmark`/`normalizeLandmarks` in poseMath, the `width`/`height` migration, and `apply_schema_sql` applying **all** migrations. |
+| `4046982` | `holdSuggestions.js` + `HoldSuggestions.jsx` — the "Holds in use" panel on the tag form. |
 
-- Each slot walks a preference list — fingertip before wrist, toe before heel before ankle — so the 33-landmark CSV improves suggestions for free and the 15-landmark one still works.
-- `nearestHold` measures point-to-rectangle with 0 inside the box, matching their `distanceToBox`. They are right about why: with centre distance, a big hold the hand is resting *inside* loses to a small hold further away.
+### The geometry decision
 
-**Before merging, someone must reconcile the two modules into one.** They solve the same problem:
+**`holdMatching.js` is the single source of geometry.** It is untouched by this
+merge — byte-for-byte as B wrote it.
 
-| | `holdMatching.js` (theirs) | `holdAssignment.js` (this branch) |
-|---|---|---|
-| Layer | Primitives: `distanceToBox`, `isInsideBox`, `nearestHold`, `nearestHoldsFor`, `CONTACT_LANDMARKS` | Slot policy: `suggestHoldSlots`, `reachingSide`, preference lists |
-| Wired up | No | Yes — `MoveForm` auto-suggest |
-| Units | Takes pixels + frame size, normalizes internally | Same, via `normalizedLandmark` |
+`holdAssignment.js` was **reduced to a thin policy adapter** rather than
+deleted, because MoveForm's slot auto-suggest genuinely needs a different call
+shape from the tagging panel's: it matches *two different frames* (hands at the
+start, the reaching hand at the end) against *named slots*, where
+`nearestHoldsFor` matches one frame against a flat landmark list. That
+difference is policy, not geometry, so the policy is all that is left in it.
 
-Recommended: **keep their primitives, keep this branch's policy layer, delete the duplicated distance code here.** The convergence above was done specifically to make that a deletion rather than a rewrite. Their `nearestHold` returns `{hold, distance, inside, index}` where this one returns the hold, so the policy layer needs a one-line adaptation.
+Deleted from `holdAssignment.js`, now used from their canonical homes:
 
-Also worth taking from their side: the **video-dimensions migration**. Auto-suggest needs the source resolution to normalize pixel landmarks, and currently bails out (suggesting nothing) when `currentVideo.width` / `.height` are absent — which is the state on this branch. **Until that migration and the field that feeds it are merged, auto-suggest will silently suggest nothing.** Manual picking is unaffected.
+| Was duplicated | Now comes from |
+|---|---|
+| `boxCenter`, `distanceToBox` | `holdMatching.distanceToBox` (via `nearestHold`) |
+| `nearestHold` (centre-distance) | `holdMatching.nearestHold` (point-to-rectangle) |
+| `normalizedLandmark` | `poseMath.normalizeLandmark` |
+| `landmarkFromRow` | `holdSuggestions.landmarkFromRow` |
 
----
+The centre-distance version was also simply **worse**, which the merge settled
+for free: with it, a large hold the hand is resting *inside* could lose to a
+small hold further away. B's point-to-rectangle distance (0 when inside) is
+correct, and that behaviour is now what the slot suggester gets.
+
+The one arithmetic left in `holdAssignment.js` is a `Math.hypot` in
+`reachingSide`, measuring how far each hand travelled between two frames. No
+box is involved, so no primitive covers it; both points still go through
+`poseMath.normalizeLandmark` first, so it stays scale-correct on a non-square
+frame — pinned by a test at 1000×2000.
+
+### Both UI surfaces kept
+
+- **MoveForm four-slot assignment (C)** — start-left, start-right, end, foot,
+  each with "pick on video", hold type, hold qualities, and auto-suggest.
+- **"Holds in use" panel on the tag form (B)** — `HoldSuggestions` wired into
+  `TaggingMode`, click-to-apply, four distinguishable empty states.
+
+They do not collide: one answers "which hold is this *move* about" during
+define mode, the other "which holds is the climber on *right now*" during
+tagging. Their thresholds differ accordingly and deliberately —
+`SUGGEST_THRESHOLD` 0.15 for the move slots (a near-miss is still the right
+hold, and the labeller confirms it anyway) against `CONTACT_THRESHOLD` 0.04 for
+live contact (which wants to be strict).
+
+**C's `traction_sources` fix and B's TaggingMode changes are both in.** The
+component no longer requires the removed `traction_sources` config key or posts
+`traction_source`/`traction_direction`, *and* it fetches holds and renders the
+suggestion panel. Config is read from the store, not re-fetched.
+
+### Duplicates git merged silently
+
+Three needed hand-resolution — git combined both copies without reporting a
+conflict, which would have shipped broken:
+
+- `client.js` — two `getHolds`/`createHold`/`deleteHold` definitions. Kept C's
+  superset (it adds `createHoldsBulk` and `updateHold`, and its `createHold`
+  is the one the overlay calls); B's were unused by its own admission.
+- `useStore.js` — two `holds`/`setHolds`/`addHold`/`removeHold` keys. Kept C's
+  superset, carrying B's normalization note across.
+- `App.css` — the `@media` block lost its closing brace, because git treated it
+  as context shared with B's appended block. Restored.
+
+### Kept from B without change
+
+- The 33-landmark CSV **with rounding**, its golden file
+  (`scripts/fixtures/golden_pose.csv`) and `make-golden` script.
+- The `width`/`height` migration and the `apply_schema_sql` all-migrations
+  change — both needed, and both now exercised by the backend suite.
+- `VideoUpload` falling back to measured `width`/`height` when the backend
+  echoes null, merged with C's detection-and-holds block.
+
+**This also clears the caveat this section used to carry**: auto-suggest no
+longer silently suggests nothing, because `currentVideo` now carries
+`width`/`height`. Where they are genuinely absent — a video registered before
+the migration — it still suggests nothing rather than guessing a resolution,
+which is the correct behaviour and is pinned by a test.
 
 ## C10. Cutover runbook — backend §9 and this branch, merged
 
@@ -260,13 +368,19 @@ This supersedes §9 of `backend/REPORT.md`. The governing fact is unchanged:
 
 > `adorable-integrity` (backend) **and** `Data_collection_climbing` (frontend) both auto-deploy from **`main`**, with **Wait for CI off**. A push to `main` deploys both within seconds. There is no staging gate.
 
-**Therefore: do not merge any of these branches alone. Merge backend + pose-extractor-v2 + this branch to `main` in one go.**
+**Therefore: do not merge any of these branches alone.**
+
+`feat/pose-extractor-v2` is now merged *into* this branch (§C9), so what remains
+is two branches, not three: **merge `feat/supabase-r2-schema-v3` and
+`feat/ux-round-holds` to `main` in one go.** This branch already contains every
+pose-extractor commit through `4046982`.
 
 ### Before the merge
 
-- [ ] **Reconcile `holdMatching.js` and `holdAssignment.js` into one module** (§C9). Nothing else in this list matters if two modules are computing nearest-hold differently.
-- [ ] **Merge the video-dimensions migration** and confirm `currentVideo` carries `width`/`height`, or auto-suggest stays silent (§C9).
-- [ ] Run the **backend suite against a scratch Postgres** — `TEST_DATABASE_URL=<throwaway>`. It drops and recreates the labeling tables, so never point it at production. The holds endpoints added here have not been exercised against a real database.
+- [x] ~~Reconcile `holdMatching.js` and `holdAssignment.js`~~ — **done** (§C9). `holdMatching` is the single source of geometry; `holdAssignment` is a thin policy adapter over it.
+- [x] ~~Merge the video-dimensions migration~~ — **done**. `currentVideo` carries `width`/`height`, with a fallback to the measured values when the backend echoes null.
+- [x] ~~Run the backend suite against a scratch Postgres~~ — **done**. 72 pass, including new coverage for the bulk and update hold endpoints. Reproduce with `scripts/setup_test_db.sh` (§C5).
+- [ ] Re-run both suites after the merge to `main` resolves any further conflicts.
 - [ ] Confirm the frontend is complete against the §7 contract: bearer token on every `/api` call, JSON register, three-step presigned upload, four-slot environment, `foot_cut`/`timing`/`dyno_style`/`traction_*` gone, 307s followed. *(Done on this branch — re-verify after the merge resolves conflicts.)*
 - [ ] `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` point at the **new** project `nbqtgknayvsjkevaoeef`. *(Done — §C7.)*
 - [ ] Someone can sign in on the new Supabase project. **It has no users beyond the two `smoke-test-*@dynalytix.test` accounts** — decide whether sign-ups are open, or create the labelers' accounts by hand. Check whether email confirmation is on: if it is, `AuthGate` will say so and nobody gets in until they click the link.
@@ -364,7 +478,7 @@ cd data_collection/frontend && npm run dev                       # another
 - [ ] Try **Save Move** with a required slot empty → it names the missing slot rather than failing silently.
 - [ ] Fill it in and save. The panel closes and the strip reads **1 move defined · 1 labeled · 0 tagged**.
 
-*(If the slots arrive pre-filled and marked **suggested**, auto-suggest is working. On this branch it will most likely suggest nothing, because the video-dimensions migration has not merged — see §C9. That is expected, not a bug, and manual picking is unaffected.)*
+*(If the slots arrive pre-filled and marked **suggested**, auto-suggest is working — it needs holds drawn in step 3 and the video's `width`/`height`, both of which this branch now has. A video registered before the dimensions migration will suggest nothing, deliberately: see §C9.)*
 
 ### 6. Define a second move
 - [ ] Mark `[` and `]` again and open the form. **Wall angle and the hold types/qualities prefill** from the previous move; the hold assignments do **not**.
@@ -376,6 +490,8 @@ cd data_collection/frontend && npm run dev                       # another
 - [ ] Scrub to a frame and add a sensation tag. Hover its **"i"** — the definition appears.
 - [ ] The tag shows on the timeline. The strip's **tagged** count goes up.
 - [ ] Confirm there is **no Traction Source or Traction Direction field** anywhere — removed in v3.
+- [ ] The **"Holds in use"** panel is there. On a frame where the climber is on the holds you boxed in step 3, it lists them; **click a row** and the body parts land in the tag form (a hand becomes the wrist, a foot becomes the ankle — `BODY_PARTS` has no fingertip or toe). Clicking a second row **adds** to the selection rather than replacing it.
+- [ ] Scrub to a frame where the climber is mid-move, off the holds. The panel says so in words — "no contact", not an empty box. Four distinct messages exist (no holds / no dimensions / no pose / no contact); any of them is correct behaviour, a blank panel is not.
 
 ### 8. Export and download
 - [ ] Click **Finish & Export**.
@@ -465,15 +581,17 @@ precisely the invariant step 5 verifies.
 
 ### 1.4 The CSV column contract — recorded exactly
 
-⚠️ **The contract differs from the one named in the task.** The task described
-"33 landmarks x/y/z/visibility, 10 joint angles". The code emits **15 landmarks and 12
-angles**, and the first two columns are `frame_number`/`timestamp_ms`, not
-`frame_index`/`timestamp`. The **shipped format below is authoritative** and is what this
-branch keeps byte-identical, since changing it would break `SkeletonOverlay`'s positional
-indexing and the backend's stored CSVs. Flagging it in case the 33-landmark shape was the
-actual intent — that would be a deliberate, separate migration.
+> **Updated by the landmark widening — see §9.** The contract is now **147 columns /
+> 33 landmarks**. This section describes the *current* format; the original 15-landmark,
+> 75-column layout is preserved verbatim as the first 75 columns, so everything below
+> about column 75 is additive. §9 covers what changed and why.
 
-**75 columns**, in this order:
+When this branch started, the code emitted **15 landmarks and 12 angles** — not the
+"33 landmarks, 10 joint angles" the original brief named. That gap is what §9 closes.
+The angle count stays at **12**: the brief's "10" omitted `angle_upper_back` and
+`angle_lower_back`, which the code has always emitted.
+
+**147 columns**, in this order:
 
 1. `frame_number` — integer, from 0
 2. `timestamp_ms` — float, milliseconds
@@ -483,15 +601,23 @@ actual intent — that would be a deliberate, separate migration.
    `angle_left_elbow`, `angle_right_elbow`, `angle_left_shoulder`, `angle_right_shoulder`,
    `angle_left_hip`, `angle_right_hip`, `angle_left_knee`, `angle_right_knee`,
    `angle_left_ankle`, `angle_right_ankle`, `angle_upper_back`, `angle_lower_back`
-5. **15 landmarks × 4 fields** = 60 columns, `landmark_<name>_{x,y,z,visibility}` in this
-   landmark order: `nose`, `left_shoulder`, `right_shoulder`, `left_elbow`, `right_elbow`,
-   `left_wrist`, `right_wrist`, `left_hip`, `right_hip`, `left_knee`, `right_knee`,
-   `left_ankle`, `right_ankle`, `left_heel`, `right_heel`
+5. **33 landmarks × 4 fields** = 132 columns, `landmark_<name>_{x,y,z,visibility}`.
+   Names are MediaPipe's canonical ones. The order is **the original 15 first**, then the
+   18 added ones — *not* MediaPipe index order (§9 explains why).
+
+   **Original 15** (columns 16–75, unchanged): `nose`, `left_shoulder`, `right_shoulder`,
+   `left_elbow`, `right_elbow`, `left_wrist`, `right_wrist`, `left_hip`, `right_hip`,
+   `left_knee`, `right_knee`, `left_ankle`, `right_ankle`, `left_heel`, `right_heel`
+
+   **Added 18** (columns 76–147), in MediaPipe index order: `left_eye_inner`, `left_eye`,
+   `left_eye_outer`, `right_eye_inner`, `right_eye`, `right_eye_outer`, `left_ear`,
+   `right_ear`, `mouth_left`, `mouth_right`, `left_pinky`, `right_pinky`, `left_index`,
+   `right_index`, `left_thumb`, `right_thumb`, `left_foot_index`, `right_foot_index`
 
 Header line, verbatim:
 
 ```
-frame_number,timestamp_ms,speed_center_of_mass,angle_left_elbow,angle_right_elbow,angle_left_shoulder,angle_right_shoulder,angle_left_hip,angle_right_hip,angle_left_knee,angle_right_knee,angle_left_ankle,angle_right_ankle,angle_upper_back,angle_lower_back,landmark_nose_x,landmark_nose_y,landmark_nose_z,landmark_nose_visibility,landmark_left_shoulder_x,landmark_left_shoulder_y,landmark_left_shoulder_z,landmark_left_shoulder_visibility,landmark_right_shoulder_x,landmark_right_shoulder_y,landmark_right_shoulder_z,landmark_right_shoulder_visibility,landmark_left_elbow_x,landmark_left_elbow_y,landmark_left_elbow_z,landmark_left_elbow_visibility,landmark_right_elbow_x,landmark_right_elbow_y,landmark_right_elbow_z,landmark_right_elbow_visibility,landmark_left_wrist_x,landmark_left_wrist_y,landmark_left_wrist_z,landmark_left_wrist_visibility,landmark_right_wrist_x,landmark_right_wrist_y,landmark_right_wrist_z,landmark_right_wrist_visibility,landmark_left_hip_x,landmark_left_hip_y,landmark_left_hip_z,landmark_left_hip_visibility,landmark_right_hip_x,landmark_right_hip_y,landmark_right_hip_z,landmark_right_hip_visibility,landmark_left_knee_x,landmark_left_knee_y,landmark_left_knee_z,landmark_left_knee_visibility,landmark_right_knee_x,landmark_right_knee_y,landmark_right_knee_z,landmark_right_knee_visibility,landmark_left_ankle_x,landmark_left_ankle_y,landmark_left_ankle_z,landmark_left_ankle_visibility,landmark_right_ankle_x,landmark_right_ankle_y,landmark_right_ankle_z,landmark_right_ankle_visibility,landmark_left_heel_x,landmark_left_heel_y,landmark_left_heel_z,landmark_left_heel_visibility,landmark_right_heel_x,landmark_right_heel_y,landmark_right_heel_z,landmark_right_heel_visibility
+frame_number,timestamp_ms,speed_center_of_mass,angle_left_elbow,angle_right_elbow,angle_left_shoulder,angle_right_shoulder,angle_left_hip,angle_right_hip,angle_left_knee,angle_right_knee,angle_left_ankle,angle_right_ankle,angle_upper_back,angle_lower_back,landmark_nose_x,landmark_nose_y,landmark_nose_z,landmark_nose_visibility,landmark_left_shoulder_x,landmark_left_shoulder_y,landmark_left_shoulder_z,landmark_left_shoulder_visibility,landmark_right_shoulder_x,landmark_right_shoulder_y,landmark_right_shoulder_z,landmark_right_shoulder_visibility,landmark_left_elbow_x,landmark_left_elbow_y,landmark_left_elbow_z,landmark_left_elbow_visibility,landmark_right_elbow_x,landmark_right_elbow_y,landmark_right_elbow_z,landmark_right_elbow_visibility,landmark_left_wrist_x,landmark_left_wrist_y,landmark_left_wrist_z,landmark_left_wrist_visibility,landmark_right_wrist_x,landmark_right_wrist_y,landmark_right_wrist_z,landmark_right_wrist_visibility,landmark_left_hip_x,landmark_left_hip_y,landmark_left_hip_z,landmark_left_hip_visibility,landmark_right_hip_x,landmark_right_hip_y,landmark_right_hip_z,landmark_right_hip_visibility,landmark_left_knee_x,landmark_left_knee_y,landmark_left_knee_z,landmark_left_knee_visibility,landmark_right_knee_x,landmark_right_knee_y,landmark_right_knee_z,landmark_right_knee_visibility,landmark_left_ankle_x,landmark_left_ankle_y,landmark_left_ankle_z,landmark_left_ankle_visibility,landmark_right_ankle_x,landmark_right_ankle_y,landmark_right_ankle_z,landmark_right_ankle_visibility,landmark_left_heel_x,landmark_left_heel_y,landmark_left_heel_z,landmark_left_heel_visibility,landmark_right_heel_x,landmark_right_heel_y,landmark_right_heel_z,landmark_right_heel_visibility,landmark_left_eye_inner_x,landmark_left_eye_inner_y,landmark_left_eye_inner_z,landmark_left_eye_inner_visibility,landmark_left_eye_x,landmark_left_eye_y,landmark_left_eye_z,landmark_left_eye_visibility,landmark_left_eye_outer_x,landmark_left_eye_outer_y,landmark_left_eye_outer_z,landmark_left_eye_outer_visibility,landmark_right_eye_inner_x,landmark_right_eye_inner_y,landmark_right_eye_inner_z,landmark_right_eye_inner_visibility,landmark_right_eye_x,landmark_right_eye_y,landmark_right_eye_z,landmark_right_eye_visibility,landmark_right_eye_outer_x,landmark_right_eye_outer_y,landmark_right_eye_outer_z,landmark_right_eye_outer_visibility,landmark_left_ear_x,landmark_left_ear_y,landmark_left_ear_z,landmark_left_ear_visibility,landmark_right_ear_x,landmark_right_ear_y,landmark_right_ear_z,landmark_right_ear_visibility,landmark_mouth_left_x,landmark_mouth_left_y,landmark_mouth_left_z,landmark_mouth_left_visibility,landmark_mouth_right_x,landmark_mouth_right_y,landmark_mouth_right_z,landmark_mouth_right_visibility,landmark_left_pinky_x,landmark_left_pinky_y,landmark_left_pinky_z,landmark_left_pinky_visibility,landmark_right_pinky_x,landmark_right_pinky_y,landmark_right_pinky_z,landmark_right_pinky_visibility,landmark_left_index_x,landmark_left_index_y,landmark_left_index_z,landmark_left_index_visibility,landmark_right_index_x,landmark_right_index_y,landmark_right_index_z,landmark_right_index_visibility,landmark_left_thumb_x,landmark_left_thumb_y,landmark_left_thumb_z,landmark_left_thumb_visibility,landmark_right_thumb_x,landmark_right_thumb_y,landmark_right_thumb_z,landmark_right_thumb_visibility,landmark_left_foot_index_x,landmark_left_foot_index_y,landmark_left_foot_index_z,landmark_left_foot_index_visibility,landmark_right_foot_index_x,landmark_right_foot_index_y,landmark_right_foot_index_z,landmark_right_foot_index_visibility
 ```
 
 Value rules that must survive the rewrite:
@@ -503,7 +629,7 @@ Value rules that must survive the rewrite:
   *not* be used as the multiplier — the original `videoWidth`/`videoHeight` must be, or
   every coordinate silently shrinks and the overlay misaligns.
 - `z` is raw MediaPipe depth, passed through unscaled. `visibility` is `lm.visibility || 0`.
-- A frame with no detected pose emits `frame_number,timestamp_ms,0` then `''` for all 72
+- A frame with no detected pose emits `frame_number,timestamp_ms,0` then `''` for all 144
   remaining columns.
 - Numbers are stringified by `Array.join`, i.e. JS default formatting.
 
@@ -581,9 +707,10 @@ Per instruction, decisions were made without asking and are recorded here.
    WASM glue and JS wrapper must agree, and `@latest` defeats CDN caching.
 5. **`requestVideoFrameCallback` required**; no seek fallback. A browser without it
    gets a message naming Chrome, Edge and Safari in place of the upload panel.
-6. **CSV contract kept as shipped** (75 columns, 15 landmarks, 12 angles) rather than
-   the 33-landmark/10-angle shape named in the brief. See §1.4 — this is the one place
-   the brief and the code disagreed, and the code won. Raise it if that was wrong.
+6. **CSV contract initially kept as shipped** (75 columns, 15 landmarks, 12 angles)
+   rather than the 33-landmark shape named in the brief, since the brief and the code
+   disagreed. **Superseded:** the widening in §9 takes it to 147 columns / 33 landmarks,
+   additively. Angles stay at 12.
 7. **`REPORT.md` lives in `data_collection/frontend/`**, since the backend has its own.
 8. **Holes are filled, not skipped.** A missing frame index produces a pose-less row
    rather than a gap, because `SkeletonOverlay` indexes the CSV positionally.
@@ -786,3 +913,438 @@ bearer token, and this branch adds no login screen (§8). With no session you sh
   speed.
 - **No end-to-end timing has been measured** (§6). The headline performance claim is
   reasoned, not observed.
+
+---
+
+## 9. Landmark widening — 15 → 33 landmarks (follow-up)
+
+The CSV now carries **all 33 MediaPipe Pose landmarks**, `x`/`y`/`z`/`visibility` each,
+alongside the unchanged 12 angles. **147 columns**, up from 75.
+
+MediaPipe always returned all 33; the old `LANDMARK_MAP` simply discarded 18 of them
+before they reached the CSV. So this costs nothing at inference time — the landmarks were
+already computed and thrown away. The only real cost is file size (below).
+
+### Column order: additive, not canonical
+
+The 18 new landmarks are **appended after** the original 15 rather than interleaved into
+MediaPipe index order. Index order would have been tidier, but it would push
+`left_shoulder` from column 19 to column 23 and shift every column after it.
+
+Appending keeps the change **purely additive in layout**: the first 75 columns are the
+same columns, in the same order, under the same names. A positional reader of the old
+format keeps working unchanged, and a name-based reader is unaffected either way. Within
+the appended block the 18 are in MediaPipe index order, so there is still a rule, just
+applied to the new columns only.
+
+> **Note on "byte-identical".** §10 rounds coordinates for output, which changes the
+> *values* in every landmark column including the original 15. The columns are unchanged;
+> the digits in them are shorter. A byte-comparison against a CSV produced before §10
+> will differ, and that is intended.
+
+New names are MediaPipe's canonical ones. The original 15 already used canonical names,
+so **no existing column name changed**:
+
+| Added | MediaPipe indices |
+|---|---|
+| Face — `left_eye_inner`, `left_eye`, `left_eye_outer`, `right_eye_inner`, `right_eye`, `right_eye_outer`, `left_ear`, `right_ear`, `mouth_left`, `mouth_right` | 1–10 |
+| Hands — `left_pinky`, `right_pinky`, `left_index`, `right_index`, `left_thumb`, `right_thumb` | 17–22 |
+| Feet — `left_foot_index`, `right_foot_index` | 31, 32 |
+
+For climbing, the hand and foot landmarks are the interesting ones: `left_index` /
+`left_thumb` / `left_pinky` give hand orientation on a hold, and `left_foot_index` gives
+toe position, none of which the heel-only foot model could express.
+
+### Golden file replaces the ad-hoc diff
+
+The previous byte-identical check compared against the old implementation recovered from
+git, which stops being possible once the contract deliberately changes. It is now a
+committed golden file:
+
+- `scripts/fixtures/golden_pose.csv` — 40 rows, 147 columns, 96,744 bytes.
+- `scripts/golden_frames.mjs` — the seeded, deterministic frames behind it, shared by the
+  generator and the test so the two cannot drift. It deliberately includes pose-less
+  frames, frames with individual landmarks missing, null angles, and the first frame's
+  zero centre-of-mass speed.
+- `npm run make-golden` regenerates it. **Regenerate only when the contract is meant to
+  change, and read the diff.**
+
+**33 tests pass** (was 25). The 8 new ones cover the golden bytes, the 147-column header,
+all 33 canonical names at their correct indices, the original 15 names surviving, and —
+the important one — *the first 75 columns of the golden file reproducing the
+pre-widening format exactly*.
+
+The golden test was checked for bite: reordering the landmarks into canonical index order
+fails 5 tests, and renaming a single landmark fails 5 tests. The row-count, `frame_index`
+contiguity and `timestamp = frame_index / fps` tests all still pass unchanged.
+
+### Backend check (read-only — no backend file modified)
+
+Both are column-agnostic; **no backend change is needed**:
+
+- **`POST /api/videos/register`** treats `csv_data` as opaque text. It length-checks the
+  UTF-8 bytes and puts the string straight to R2 (`api.py:591`, `api.py:612`). It never
+  parses columns.
+- **`exporter.py`** reads with `csv.DictReader` and builds its writer from
+  `list(reader.fieldnames) + self.label_columns()` (`exporter.py:50–52`, `150–155`) — it
+  passes whatever columns arrive straight through and appends the label columns. The only
+  column name it depends on is **`frame_number`** (`exporter.py:161`), which remains
+  column 1.
+- No `landmark_*` or `angle_*` name appears anywhere in the backend Python. The other
+  `frame_number` hits are the `frame_tags` table, unrelated to the pose CSV.
+
+### Size: doubled by the widening, then more than undone by rounding
+
+The widening alone took the row from **1,154 → 2,330 bytes, a 2.02× increase**, which put
+a 5-minute 60fps clip at ~48 MB against the backend's 60 MB `MAX_REGISTER_BYTES`.
+
+**§10 resolved this.** Rounding coordinates for output brings the row to **1,091 bytes** —
+*below the original 75-column format's 1,154*, with 18 more landmarks in it. Current
+figures are in §10.
+
+### One visible side effect — resolved in §10
+
+`SkeletonOverlay` drew a joint dot for **every** `landmark_*` column it found, so the
+widening would have put 33 dots on the overlay instead of 15, cluttering the face.
+**§10 filters the display back to the original 15.**
+
+---
+
+## 10. Output rounding and overlay filtering (follow-up)
+
+### 10.1 Coordinate rounding
+
+Landmark values are rounded **in the CSV writer only**:
+
+| Field | Decimals |
+|---|---|
+| `landmark_*_x`, `landmark_*_y`, `landmark_*_z` | **4** |
+| `landmark_*_visibility` | **3** |
+
+Rounding is applied at write time, never to the in-memory result, so angles and
+centre-of-mass speed are still derived from full-precision landmarks — only the stored
+text is shortened. `Math.round(v * 10**d) / 10**d` rather than `toFixed`, so values
+stringify without padding (`0` stays `"0"`, not `"0.0000"`), with `-0` collapsed to `0`
+and no exponent notation. Three tests enforce all of that.
+
+**Correcting the premise this was requested under:** `x` and `y` are **pixel coordinates
+at source resolution**, not normalized — `computeResult` multiplies MediaPipe's
+normalized output by the original `videoWidth`/`videoHeight` (§1.4). Only `z` and
+`visibility` are roughly normalized. The 4-decimal choice is still safe, but for a
+different reason than "sub-pixel up to 10k": at pixel scale 4 decimals is **1/10,000 of a
+pixel**, which is far more headroom than needed at any resolution. 2 decimals would still
+be comfortably sub-pixel and would save more; 4 is kept as specified.
+
+`speed_center_of_mass`, the 12 angles and `timestamp_ms` are **not** rounded — they were
+not in scope, and at 1 column each their contribution is negligible next to 132 landmark
+columns. Rounding the angles too would be an easy further saving.
+
+### 10.2 Measured effect
+
+Golden file: **96,744 → 47,208 bytes, a 51% reduction.**
+
+| Format | Bytes/row |
+|---|---|
+| 75 columns, unrounded (original) | 1,154 |
+| 147 columns, unrounded (after §9) | 2,330 |
+| **147 columns, rounded (now)** | **1,091** |
+
+**The rounding more than pays for the widening.** The CSV now carries 18 more landmarks
+per frame in *fewer* bytes per row than the original 15-landmark format used.
+
+| Clip | Pose CSV |
+|---|---|
+| 2 min @ 30fps | ~3.7 MB |
+| 2 min @ 60fps | ~7.5 MB |
+| 5 min @ 60fps | ~22.5 MB |
+| 10 min @ 60fps | ~45.0 MB |
+
+**Maximum clip under the 60 MB `MAX_REGISTER_BYTES` cap: 57,656 frames**, i.e.
+
+- **16.0 minutes at 60fps** (was ~6 minutes after §9, ~12 minutes before the widening)
+- **32.0 minutes at 30fps**
+
+The 2-minute target case sits at ~7.5 MB, roughly 12% of the cap. The `413` ceiling is no
+longer a practical concern for climbing footage.
+
+### 10.3 Tests
+
+**36 tests pass** (was 33). The golden file was regenerated with the rounded values, and
+the three new tests cover:
+
+- no landmark coordinate exceeds 4 decimals, no visibility exceeds 3, and nothing uses
+  exponent notation — checked across every value in the golden file
+- rounding does **not** reach back into `computeResult`, so in-memory precision is intact
+- values rounding toward zero from either side produce `0`, never `-0` or `1e-7`
+
+**The first-75-columns test still passes.** Note what it now means: it asserts that the
+first 75 columns of the current output match the pre-widening *column layout* — same
+columns, same order, same names. It is not a claim that the bytes match a CSV produced
+before rounding, which they deliberately do not.
+
+Row count, `frame_index` contiguity and `timestamp = frame_index / fps` are untouched and
+still green.
+
+### 10.4 Overlay: 33 landmarks stored, 15 drawn
+
+`SkeletonOverlay` now draws joint dots only for the original 15 body landmarks, via
+`LEGACY_LANDMARK_ORDER` imported from `poseMath`. **Skeleton lines are unchanged** —
+`SKELETON_CONNECTIONS` was already a fixed list and never depended on the landmark count.
+
+The data/display split is deliberate and commented in place: all 33 landmarks are
+extracted, stored and exported; the overlay just doesn't dot eyes, ears, mouth, fingers
+and toes, which cluttered the face without saying anything about the climbing. Anything
+wanting the face or hand points reads them from the CSV, where they still are.
+
+Incidentally this removed one pre-existing lint error (an unused loop variable in the old
+`Object.entries` iteration), taking `SkeletonOverlay.jsx` from 5 problems to 4. The
+remaining 4 are pre-existing hoisting and dependency-array warnings, untouched.
+
+---
+
+## 11. Coordinate spaces: landmarks vs hold boxes (follow-up)
+
+### 11.1 The mismatch
+
+Pose landmarks are stored as **pixels** at source resolution — `computeResult`
+multiplies MediaPipe's normalized output by `videoWidth`/`videoHeight` (§1.4). Hold
+bounding boxes are stored **normalized 0–1** (`public.holds`: `bbox_* CHECK (>= 0 AND
+<= 1)`). Comparing them directly is meaningless.
+
+It is worse than a scale factor. Every box looks ~200+ units away from every landmark,
+so the ranking collapses to "whichever box extends furthest right and down", because
+that shrinks the pixel gap fractionally. A hold the hand is **literally inside** loses to
+one on the opposite corner of the wall. There is a test pinning exactly that.
+
+### 11.2 ⚠️ The nearest-box comparison does not exist yet
+
+**There is no hold-matching code anywhere in this repo**, and there was none before this
+change. Checked:
+
+- **Frontend** — no bbox or nearest-box logic. The `hold_type_reaching` /
+  `hold_type_non_reaching` / `hold_quality` fields in `MoveForm` and the store are Lens-1
+  *taxonomy dropdowns*, unrelated to bounding boxes.
+- **Backend** — `/api/holds` is CRUD only: create, list-by-video, delete. No distance,
+  nearest, or matching logic in any Python file.
+
+So there was nothing to fix. What this adds is the **primitives, with the units handled
+correctly**, so whoever builds the feature does not rediscover the bug:
+
+| Added | Purpose |
+|---|---|
+| `poseMath.normalizeLandmark(lm, w, h)` | Pixel → normalized. Divides `x`/`y` only. |
+| `poseMath.normalizeLandmarks(map, w, h)` | Whole landmark map; skips internal `_com`. |
+| `holdMatching.distanceToBox(point, box)` | Point-to-rectangle, 0 inside. |
+| `holdMatching.isInsideBox(point, box)` | Containment. |
+| `holdMatching.nearestHold(lm, holds, w, h, opts)` | Normalizes, then ranks. `maxDistance` in normalized units. |
+| `holdMatching.nearestHoldsFor(...)` | Several landmarks at once. |
+| `holdMatching.CONTACT_LANDMARKS` | The four fingertip/toe points that touch holds. |
+
+`src/services/holdMatching.js` was marked NOT WIRED UP. **§12 wires it up** — the file
+itself is unchanged.
+
+Two deliberate choices:
+
+- **`z` is never divided.** MediaPipe's `z` is a depth estimate on roughly the same scale
+  as normalized `x`, and is stored unmultiplied, so dividing it by a pixel dimension
+  would corrupt it. A test pins this.
+- **Unknown frame size returns `null`, it does not guess.** Rows registered before §11.3
+  have no dimensions. Assuming 1920×1080 would produce a confident, wrong answer; `null`
+  forces the caller to skip the comparison.
+
+`CONTACT_LANDMARKS` is `left_index`, `right_index`, `left_foot_index`, `right_foot_index`
+— fingertips and toes rather than wrists and heels, since those sit far closer to the
+hold actually being used. **These only exist because of the §9 widening**; the
+15-landmark format had no fingertip or toe, so accurate contact matching was not possible
+before it.
+
+### 11.3 Backend: extras are silently dropped, so a migration was required
+
+**Checked first, as asked: the backend does *not* store unknown JSON fields.** No
+pydantic model sets `model_config` or `extra=`, so pydantic v2's default `extra='ignore'`
+applies. Verified empirically against the installed pydantic 2.12.5:
+
+```python
+class M(BaseModel): a: int
+M(**{'a': 1, 'width': 1920}).model_dump()   # -> {'a': 1}
+```
+
+`width` and `height` would have been **accepted and silently discarded** — no error, no
+warning, nothing stored. So the migration was necessary.
+
+**`supabase/migrations/20260913180000_add_video_dimensions.sql`** adds nullable
+`width`/`height` `integer` columns to `public.videos`, with `CHECK (… IS NULL OR … > 0)`.
+Additive and nullable, because rows written before it must stay valid.
+
+Two traps this had to avoid, neither obvious from the migration alone:
+
+1. **`check_schema()` requires an *exact* match** against `SCHEMA_VERSION` (`!=`, not
+   `<`). Bumping `schema_version` to 4 would make the API **refuse to start** against any
+   database that had not yet had this file applied, and would break
+   `test_schema_version_is_three`. The migration therefore **does not bump
+   `schema_version`** — it is purely additive and nullable, so a v3 reader is unaffected.
+   That decision is commented in the migration file.
+2. **`apply_schema_sql()` globbed `*_schema_v3.sql` only**, applying just the base file.
+   The test suite builds its schema through it, so a test database would have been left
+   without the new columns and every video-creating test would have failed on an
+   unknown column. It now applies **every** `supabase/migrations/*.sql` in filename
+   order. This was a latent limitation: any future additive migration would have hit it.
+
+Plumbed through: `models.Video` (`Optional[int]`), `database.create_video` and
+`_row_to_video` (via `row.get`, so a database still on v3 reads back as unknown rather
+than raising), `api.VideoRegister` (optional, `gt=0`), `api.VideoResponse`,
+`video_to_response`, and the register insert.
+
+**This is the one additional backend change**, and it is confined to those files plus the
+new migration. Nothing else in the backend was touched.
+
+### 11.4 Frontend plumbing
+
+`extractFromFile` already returned `width`/`height`; they are now sent in the register
+payload and kept on the store's video object. `setCurrentVideo` falls back to the
+measured values when the response echoes `null`, so a frontend running against a backend
+that has not yet applied the migration still has the dimensions in memory for the
+session.
+
+### 11.5 Verification
+
+**Frontend: 48 tests pass** (was 36). The 12 new ones cover normalization (including `z`
+untouched and the round-trip back to MediaPipe's input), refusal on unknown frame size,
+point-to-rectangle distance, containment agreeing with zero distance, `maxDistance` in
+normalized units, per-landmark matching, the contact landmarks existing in the 33-set —
+and the divergence test that pins the bug itself.
+
+**Backend: 61 tests pass**, run against a throwaway local Postgres, *not* the live
+Supabase project — the v3 migration `DROP`s and recreates the labeling tables, so running
+the suite against production data would destroy it. Plain Postgres needs a small `auth`
+schema shim (`auth.uid()`, `auth.role()`) for the RLS policies; with that in place the
+suite is green, including `test_schema_version_is_three`, which still passes precisely
+because the version was not bumped.
+
+Round-trip checked directly against the migrated table: `width`/`height` store and read
+back as `1920`/`1080`; a video registered without them reads back `None`/`None`; and
+`width=0` is rejected by the `CHECK` constraint.
+
+### 11.6 Coordination note
+
+The backend files touched here (`models.py`, `database.py`, `api.py`) are the same ones
+the Supabase/R2 session is working in on `feat/supabase-r2-schema-v3`. **These edits are
+small and additive, but they will need a careful merge** if that branch has moved. The
+`apply_schema_sql` change in particular alters shared behaviour — it now applies all
+migrations rather than only the base schema.
+
+---
+
+## 12. Hold auto-suggest UI (follow-up)
+
+The primitives from §11 are now wired into the tagging flow. **`holdMatching.js` is
+byte-for-byte unchanged** — no unit handling was touched. Everything new sits on top of
+it and delegates every coordinate decision downward.
+
+### 12.1 What it does
+
+While tagging a frame, a **Holds in use** panel shows which holds the climber is on:
+
+```
+HOLDS IN USE                                 frame 412
+  ✋ Left hand      hold #11              on
+  🦶 Right foot     hold #33      2.1% away
+  [ Use all 2 ]
+  Suggested: left_wrist, right_ankle · left side
+```
+
+Clicking a row applies it to the frame-tag form. This is the part that makes it a
+*suggestion* rather than a readout: the contacts map onto fields that actually exist.
+`BODY_PARTS` has no fingertip or toe entry, so each contact degrades to the nearest real
+option — `left_index → left_wrist`, `right_foot_index → right_ankle` — which is what a
+tag on that limb would carry anyway.
+
+It is **read-only assistance**. It never writes a tag by itself, every suggestion is one
+click to apply and free to ignore, and applying is additive, so accepting two in a row
+keeps both body parts. `side` is only filled when the contacts agree on one — a tag
+carries a single side, so two hands must leave that to the labeller.
+
+### 12.2 Layering
+
+| Layer | File | Owns |
+|---|---|---|
+| Primitives (§11, **unchanged**) | `services/holdMatching.js` | pixel→normalized, point-to-box distance, nearest, unknown-size refusal |
+| Labelling logic (new) | `services/holdSuggestions.js` | limb→body-part mapping, contact threshold, visibility filter, reason codes |
+| UI (new) | `components/HoldSuggestions.jsx` | rendering, click-to-apply |
+| Wiring | `components/TaggingMode.jsx` | fetches holds, applies suggestions to the tag form |
+
+`holdSuggestions.js` does **no geometry**. It calls `nearestHoldsFor` and reads the
+result. If a suggestion is wrong in space, the bug is in the inputs — a missing
+`width`/`height`, a bad `bbox` — not in that file.
+
+Two thresholds, both judgement calls rather than derived facts:
+
+- **`CONTACT_THRESHOLD = 0.04`** — 4% of the frame. Roughly a hold's own width, which
+  absorbs landmark jitter without matching a limb halfway across the wall. Passed to
+  `nearestHold` as `maxDistance`, in normalized units.
+- **`minVisibility = 0.5`** — an occluded hand sitting exactly on a hold produces no
+  suggestion. A confident suggestion from a limb MediaPipe cannot see is worse than none.
+
+### 12.3 It explains itself when it has nothing to say
+
+Four distinguishable reasons, rendered as prose rather than an empty list, so "nothing
+detected" is never mistaken for "broken":
+
+| Reason | Shown as |
+|---|---|
+| `no-holds` | No holds recorded for this video yet |
+| `no-dimensions` | Registered before frame dimensions were stored — re-upload to enable |
+| `no-pose` | No pose detected on this frame |
+| `no-contact` | No hand or foot near a hold on this frame |
+
+`no-dimensions` is the §11 refusal surfacing in the UI: rather than assuming 1920×1080
+for a video registered before the migration, it says so.
+
+### 12.4 ⚠️ Prerequisite: nothing creates holds yet
+
+**In practice this panel will show "No holds recorded for this video yet" for every
+video today.** `/api/holds` accepts `POST`, but nothing in the frontend calls it — there
+is no hold-drawing UI and no detection. The suggest path is complete and tested; the
+supply of holds is not.
+
+Building hold creation was **not** in scope here and I did not add it. The smallest thing
+that would make this live is a box-drawing overlay on the video that `POST`s normalized
+`bbox_*` — the API client functions it would need (`createHold`, `deleteHold`) are
+already added and unused. Say the word.
+
+### 12.5 Also added
+
+- **Holds API client**: `getHolds(videoId)` → `GET /api/videos/{id}/holds`,
+  plus `createHold` / `deleteHold`. Endpoint paths verified against `api.py`.
+- **Store slice**: `holds`, `setHolds`, `addHold`, `removeHold`, matching the existing
+  `moves` / `frameTags` pattern.
+- **Fetch is best-effort.** A holds failure logs a warning and disables suggestions;
+  tagging works fine without them.
+- Routed one remaining raw `currentFrame / fps` display conversion in `TaggingMode`
+  through `frameToTime`. Same family as §3, correct before, just inconsistent.
+
+### 12.6 A real bug this surfaced
+
+The first run failed three tests on my own code. `Number('')` is `0`, and
+`Number.isFinite(0)` is `true` — so parsing a pose-less frame's empty landmark columns
+produced **a phantom limb at (0, 0)**, which then matched any hold near the frame's
+top-left corner *with full confidence and `inside: true`*.
+
+Fixed with an explicit `numberOrNull` that treats an empty cell as absent before any
+arithmetic, and pinned by a regression test. Worth noting that the trap was described in
+a comment in the test I wrote before the implementation hit it anyway — empty-string
+coercion is easy to write past.
+
+### 12.7 Verification
+
+**61 tests pass** (was 48). The 13 new ones cover row parsing and empty-column rejection,
+limb→body-part mapping against the real `BODY_PARTS` taxonomy, `sideFor` refusing on
+mixed sides, the threshold boundary (inside vs near vs beyond), the visibility filter,
+ordering surest-first, all four reason codes, the unknown-size refusal, and the
+phantom-limb regression.
+
+One test is worth calling out: **the same contact is resolved identically at 1920×1080,
+3840×2160 and 720×1280.** That is only true because the landmarks are normalized before
+comparison, and it is the property the whole §11/§12 pair exists to protect.
+
+Lint clean on every new and changed file; build succeeds.

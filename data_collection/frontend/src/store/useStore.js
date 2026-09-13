@@ -140,6 +140,9 @@ const useStore = create((set, get) => ({
     }),
 
   // ==================== HOLDS ====================
+  // Bounding boxes normalized 0-1, per video. Landmarks are stored in pixels,
+  // so anything comparing the two must normalize first (services/holdMatching,
+  // which is the single source of that geometry).
   holds: [],
   showHoldOverlay: true,
   // When set, clicking a box on the video assigns it to this MoveForm slot.

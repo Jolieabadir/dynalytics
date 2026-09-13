@@ -231,7 +231,11 @@ export const downloadExport = async (videoId) => {
 
 // ==================== HOLDS ====================
 
-/** Every hold marked on a video. */
+/**
+ * Every hold marked on a video. `bbox_*` are normalized 0-1, so they must be
+ * compared against landmarks only after normalizing those — see
+ * services/holdMatching, which is the single source of that geometry.
+ */
 export const getHolds = async (videoId) => {
   const response = await api.get(`/api/videos/${videoId}/holds`);
   return response.data;

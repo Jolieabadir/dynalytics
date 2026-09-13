@@ -122,13 +122,13 @@ function MoveForm() {
     if (!holds?.length || !csvData?.length) return;
     if (moveStart === null || moveEnd === null) return;
 
-    const frameSize = {
-      width: currentVideo?.width || currentVideo?.video_width,
-      height: currentVideo?.height || currentVideo?.video_height,
-    };
     // Without the original resolution the CSV's pixel coordinates cannot be
-    // normalized, and every suggestion would be nonsense. Better none.
-    if (!frameSize.width || !frameSize.height) return;
+    // normalized against normalized hold boxes. holdMatching refuses rather
+    // than guessing, so this bails early to say the same thing out loud: a
+    // video registered before the dimensions migration suggests nothing.
+    const width = currentVideo?.width;
+    const height = currentVideo?.height;
+    if (!(width > 0) || !(height > 0)) return;
 
     const rowAt = (frame) =>
       csvData.find((r) => Number(r.frame_number) === frame) ?? null;
@@ -137,7 +137,8 @@ function MoveForm() {
       holds,
       startRow: rowAt(moveStart),
       endRow: rowAt(moveEnd),
-      frameSize,
+      width,
+      height,
     });
 
     setSlots((prev) => {

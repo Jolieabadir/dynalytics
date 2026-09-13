@@ -112,6 +112,11 @@ class VideoRegister(BaseModel):
     fps: float
     total_frames: int
     duration_ms: float
+    # Intrinsic frame size. Optional so a client that predates the dimensions
+    # migration still registers; pose landmarks are stored as pixels, so
+    # without these they cannot later be normalized against hold boxes.
+    width: Optional[int] = Field(default=None, gt=0)
+    height: Optional[int] = Field(default=None, gt=0)
     csv_data: str
 
 
@@ -122,6 +127,8 @@ class VideoResponse(BaseModel):
     fps: float
     total_frames: int
     duration_ms: float
+    width: Optional[int] = None
+    height: Optional[int] = None
     r2_video_key: Optional[str]
     r2_pose_csv_key: Optional[str]
     r2_export_key: Optional[str]
@@ -400,6 +407,8 @@ def video_to_response(video: Video) -> VideoResponse:
         fps=video.fps,
         total_frames=video.total_frames,
         duration_ms=video.duration_ms,
+        width=video.width,
+        height=video.height,
         r2_video_key=video.r2_video_key,
         r2_pose_csv_key=video.r2_pose_csv_key,
         r2_export_key=video.r2_export_key,
@@ -636,6 +645,8 @@ async def register_video(
         fps=payload.fps,
         total_frames=payload.total_frames,
         duration_ms=payload.duration_ms,
+        width=payload.width,
+        height=payload.height,
         uploaded_at=datetime.now(timezone.utc),
     )
     video.id = db.create_video(video)

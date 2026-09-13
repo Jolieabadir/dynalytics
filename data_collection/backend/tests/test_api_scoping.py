@@ -440,3 +440,171 @@ def test_exports_mine_lists_only_own(client, fake_r2, user_a, user_b):
 def test_exports_mine_excludes_unexported(client, user_a):
     register_video(client, user_a)
     assert client.get('/api/exports/mine', headers=auth(user_a)).json() == []
+
+
+# ==================== BULK HOLD CREATE AND UPDATE ====================
+#
+# Added with the frontend hold work: the detector posts a whole frame's worth of
+# boxes in one request, and the overlay can move or resize one after the fact.
+
+
+def test_bulk_hold_create_returns_ids_in_order(client, user_a):
+    video = register_video(client, user_a)
+
+    boxes = [
+        {'bbox_x': 0.10, 'bbox_y': 0.10, 'bbox_w': 0.05, 'bbox_h': 0.05, 'source': 'detected'},
+        {'bbox_x': 0.30, 'bbox_y': 0.20, 'bbox_w': 0.06, 'bbox_h': 0.04, 'source': 'detected'},
+        {'bbox_x': 0.50, 'bbox_y': 0.60, 'bbox_w': 0.07, 'bbox_h': 0.07, 'source': 'manual'},
+    ]
+    res = client.post(
+        f'/api/videos/{video["id"]}/holds', json={'holds': boxes}, headers=auth(user_a)
+    )
+    assert res.status_code == 201, res.text
+
+    created = res.json()
+    assert len(created) == 3
+    # Order preserved, so the caller can line the response up with what it sent.
+    assert [h['bbox_x'] for h in created] == [0.10, 0.30, 0.50]
+    assert [h['source'] for h in created] == ['detected', 'detected', 'manual']
+    assert all(h['video_id'] == video['id'] for h in created)
+
+    listed = client.get(f'/api/videos/{video["id"]}/holds', headers=auth(user_a)).json()
+    assert [h['id'] for h in listed] == [h['id'] for h in created]
+
+
+def test_bulk_hold_create_accepts_an_empty_list(client, user_a):
+    video = register_video(client, user_a)
+    res = client.post(f'/api/videos/{video["id"]}/holds', json={'holds': []}, headers=auth(user_a))
+    assert res.status_code == 201
+    assert res.json() == []
+
+
+def test_bulk_hold_create_is_all_or_nothing(client, user_a):
+    """A bad box anywhere in the batch must leave no holds behind."""
+    video = register_video(client, user_a)
+    good = {'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05}
+
+    res = client.post(
+        f'/api/videos/{video["id"]}/holds',
+        json={'holds': [good, dict(good, source='nonsense'), good]},
+        headers=auth(user_a),
+    )
+    assert res.status_code == 400
+    assert 'Invalid source' in res.json()['detail']
+
+    assert client.get(f'/api/videos/{video["id"]}/holds', headers=auth(user_a)).json() == []
+
+
+def test_bulk_hold_create_rejects_an_oversized_batch(client, user_a):
+    video = register_video(client, user_a)
+    box = {'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05}
+
+    res = client.post(
+        f'/api/videos/{video["id"]}/holds', json={'holds': [box] * 201}, headers=auth(user_a)
+    )
+    assert res.status_code == 400
+    assert 'Too many holds' in res.json()['detail']
+    assert client.get(f'/api/videos/{video["id"]}/holds', headers=auth(user_a)).json() == []
+
+
+def test_bulk_hold_create_rejects_a_box_outside_the_frame(client, user_a):
+    video = register_video(client, user_a)
+    res = client.post(
+        f'/api/videos/{video["id"]}/holds',
+        json={'holds': [{'bbox_x': 1.5, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05}]},
+        headers=auth(user_a),
+    )
+    assert res.status_code == 422
+
+
+def test_bulk_hold_create_scoped_to_the_video_owner(client, user_a, user_b):
+    video = register_video(client, user_a)
+    res = client.post(
+        f'/api/videos/{video["id"]}/holds',
+        json={'holds': [{'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05}]},
+        headers=auth(user_b),
+    )
+    assert res.status_code == 404
+    assert client.get(f'/api/videos/{video["id"]}/holds', headers=auth(user_a)).json() == []
+
+
+def test_update_hold_moves_the_box(client, user_a):
+    video = register_video(client, user_a)
+    hold = client.post(
+        '/api/holds',
+        json={
+            'video_id': video['id'],
+            'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05,
+            'source': 'detected',
+        },
+        headers=auth(user_a),
+    ).json()
+
+    res = client.put(
+        f'/api/holds/{hold["id"]}',
+        json={'bbox_x': 0.42, 'bbox_y': 0.33, 'source': 'manual'},
+        headers=auth(user_a),
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body['bbox_x'] == 0.42
+    assert body['bbox_y'] == 0.33
+    assert body['source'] == 'manual'
+    # Omitted fields are left alone.
+    assert body['bbox_w'] == 0.05
+    assert body['bbox_h'] == 0.05
+
+
+def test_update_hold_with_no_fields_is_a_no_op(client, user_a):
+    video = register_video(client, user_a)
+    hold = client.post(
+        '/api/holds',
+        json={
+            'video_id': video['id'],
+            'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05,
+        },
+        headers=auth(user_a),
+    ).json()
+
+    res = client.put(f'/api/holds/{hold["id"]}', json={}, headers=auth(user_a))
+    assert res.status_code == 200
+    assert res.json()['bbox_x'] == 0.1
+
+
+def test_update_hold_rejects_a_bad_source(client, user_a):
+    video = register_video(client, user_a)
+    hold = client.post(
+        '/api/holds',
+        json={
+            'video_id': video['id'],
+            'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05,
+        },
+        headers=auth(user_a),
+    ).json()
+
+    res = client.put(f'/api/holds/{hold["id"]}', json={'source': 'nonsense'}, headers=auth(user_a))
+    assert res.status_code == 400
+    assert 'Invalid source' in res.json()['detail']
+
+
+def test_update_hold_cannot_touch_another_users_hold(client, user_a, user_b):
+    video = register_video(client, user_a)
+    hold = client.post(
+        '/api/holds',
+        json={
+            'video_id': video['id'],
+            'bbox_x': 0.1, 'bbox_y': 0.1, 'bbox_w': 0.05, 'bbox_h': 0.05,
+        },
+        headers=auth(user_a),
+    ).json()
+
+    res = client.put(f'/api/holds/{hold["id"]}', json={'bbox_x': 0.9}, headers=auth(user_b))
+    assert res.status_code == 404
+
+    # And the original is untouched.
+    still = client.get(f'/api/videos/{video["id"]}/holds', headers=auth(user_a)).json()
+    assert still[0]['bbox_x'] == 0.1
+
+
+def test_update_missing_hold_is_404(client, user_a):
+    assert client.put('/api/holds/999999', json={'bbox_x': 0.5}, headers=auth(user_a)).status_code == 404
