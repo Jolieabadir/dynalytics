@@ -32,6 +32,14 @@ import {
   CSV_LANDMARK_ORDER,
   LEGACY_LANDMARK_ORDER,
 } from '../src/services/poseMath.js';
+import { normalizeLandmark, normalizeLandmarks } from '../src/services/poseMath.js';
+import {
+  distanceToBox,
+  isInsideBox,
+  nearestHold,
+  nearestHoldsFor,
+  CONTACT_LANDMARKS,
+} from '../src/services/holdMatching.js';
 import { goldenFrames } from './golden_frames.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -525,5 +533,145 @@ test('rounding does not introduce -0 or exponent notation', () => {
   for (let i = 15; i < fields.length; i++) {
     assert.ok(!fields[i].startsWith('-0') || Number(fields[i]) !== 0, `got negative zero: ${fields[i]}`);
     assert.ok(!/e/i.test(fields[i]), `got exponent notation: ${fields[i]}`);
+  }
+});
+
+// ==================== COORDINATE SPACES / HOLD MATCHING ====================
+
+test('normalizeLandmark divides x and y by the frame, and leaves z alone', () => {
+  const lm = { x: 960, y: 270, z: 0.42, visibility: 0.9 };
+  const n = normalizeLandmark(lm, 1920, 1080);
+
+  assert.equal(n.x, 0.5);
+  assert.equal(n.y, 0.25);
+  // z is a MediaPipe depth estimate, never multiplied by a pixel dimension.
+  assert.equal(n.z, 0.42, 'z must not be divided by anything');
+  assert.equal(n.visibility, 0.9);
+});
+
+test('normalization round-trips computeResult back to MediaPipe input', () => {
+  const raw = Array.from({ length: 33 }, () => ({ x: 0.3, y: 0.7, z: 0.1, visibility: 1 }));
+  const result = computeResult(raw, 1920, 1080, 0, {});
+  const n = normalizeLandmarks(result.landmarks, 1920, 1080);
+
+  assert.ok(Math.abs(n.nose.x - 0.3) < 1e-12);
+  assert.ok(Math.abs(n.nose.y - 0.7) < 1e-12);
+});
+
+test('normalization refuses rather than guesses when the frame size is unknown', () => {
+  const lm = { x: 960, y: 270 };
+  // A guessed resolution would produce a confident, wrong answer.
+  assert.equal(normalizeLandmark(lm, 0, 1080), null);
+  assert.equal(normalizeLandmark(lm, 1920, 0), null);
+  assert.equal(normalizeLandmark(lm, undefined, undefined), null);
+  assert.equal(normalizeLandmark(lm, null, null), null);
+  assert.equal(normalizeLandmarks({ nose: lm }, 1920, null), null);
+});
+
+test('normalizeLandmarks skips internal keys', () => {
+  const n = normalizeLandmarks(
+    { nose: { x: 960, y: 540 }, _com: { x: 100, y: 100 } },
+    1920, 1080
+  );
+  assert.deepEqual(Object.keys(n), ['nose']);
+});
+
+test('distanceToBox is zero inside and shortest-edge outside', () => {
+  const box = { bbox_x: 0.4, bbox_y: 0.4, bbox_w: 0.2, bbox_h: 0.2 }; // 0.4-0.6
+
+  assert.equal(distanceToBox({ x: 0.5, y: 0.5 }, box), 0, 'centre');
+  assert.equal(distanceToBox({ x: 0.4, y: 0.4 }, box), 0, 'on the corner');
+
+  // Directly left: horizontal gap only.
+  assert.ok(Math.abs(distanceToBox({ x: 0.3, y: 0.5 }, box) - 0.1) < 1e-12);
+  // Diagonally off the corner: hypotenuse, not the sum.
+  assert.ok(Math.abs(distanceToBox({ x: 0.3, y: 0.3 }, box) - Math.hypot(0.1, 0.1)) < 1e-12);
+});
+
+test('isInsideBox agrees with a zero distance', () => {
+  const box = { bbox_x: 0.4, bbox_y: 0.4, bbox_w: 0.2, bbox_h: 0.2 };
+  for (const p of [{ x: 0.5, y: 0.5 }, { x: 0.4, y: 0.6 }, { x: 0.3, y: 0.5 }, { x: 0.7, y: 0.7 }]) {
+    assert.equal(isInsideBox(p, box), distanceToBox(p, box) === 0, JSON.stringify(p));
+  }
+});
+
+test('nearestHold normalizes the landmark before comparing — the whole point', () => {
+  // A wrist at pixel (960, 540) on a 1920x1080 frame is the centre of the
+  // frame, and should land inside a box covering the centre.
+  const wrist = { x: 960, y: 540 };
+  const holds = [
+    { bbox_x: 0.0, bbox_y: 0.0, bbox_w: 0.1, bbox_h: 0.1 }, // top-left corner
+    { bbox_x: 0.45, bbox_y: 0.45, bbox_w: 0.1, bbox_h: 0.1 }, // centre
+  ];
+
+  const hit = nearestHold(wrist, holds, 1920, 1080);
+  assert.equal(hit.index, 1, 'should match the centre hold');
+  assert.equal(hit.inside, true);
+  assert.equal(hit.distance, 0);
+});
+
+test('skipping normalization would pick the wrong hold — the bug being prevented', () => {
+  // Comparing raw pixels against normalized boxes makes every box look ~200+
+  // units away, and the ranking collapses to "whichever box extends furthest
+  // right and down", since that shrinks the pixel gap fractionally. A hold the
+  // hand is literally inside then loses to one on the far side of the wall.
+  const hand = { x: 192, y: 108 }; // normalized (0.1, 0.1) on 1920x1080
+  const holds = [
+    { bbox_x: 0.05, bbox_y: 0.05, bbox_w: 0.1, bbox_h: 0.1 }, // contains the hand
+    { bbox_x: 0.8, bbox_y: 0.8, bbox_w: 0.15, bbox_h: 0.15 }, // opposite corner
+  ];
+
+  const correct = nearestHold(hand, holds, 1920, 1080);
+  assert.equal(correct.index, 0, 'the hand is inside hold 0');
+  assert.equal(correct.inside, true);
+
+  const naive = holds
+    .map((h, index) => ({ index, distance: distanceToBox(hand, h) }))
+    .sort((a, b) => a.distance - b.distance)[0];
+
+  assert.equal(naive.index, 1, 'unnormalized comparison picks the far corner');
+  assert.ok(naive.distance > 100, `absurd distance, got ${naive.distance}`);
+  assert.notEqual(naive.index, correct.index, 'the two must disagree');
+});
+
+test('nearestHold respects maxDistance in normalized units', () => {
+  const wrist = { x: 960, y: 540 }; // normalized 0.5, 0.5
+  const holds = [{ bbox_x: 0.9, bbox_y: 0.9, bbox_w: 0.05, bbox_h: 0.05 }];
+
+  assert.equal(nearestHold(wrist, holds, 1920, 1080, { maxDistance: 0.1 }), null);
+  assert.ok(nearestHold(wrist, holds, 1920, 1080, { maxDistance: 0.9 }));
+});
+
+test('nearestHold returns null on unknown frame size or no holds', () => {
+  const wrist = { x: 960, y: 540 };
+  const holds = [{ bbox_x: 0.4, bbox_y: 0.4, bbox_w: 0.2, bbox_h: 0.2 }];
+
+  assert.equal(nearestHold(wrist, holds, null, null), null, 'unknown frame size');
+  assert.equal(nearestHold(wrist, [], 1920, 1080), null, 'no holds');
+  assert.equal(nearestHold(null, holds, 1920, 1080), null, 'no landmark');
+});
+
+test('nearestHoldsFor matches each contact landmark independently', () => {
+  const landmarks = {
+    left_index: { x: 192, y: 108 },   // normalized 0.1, 0.1
+    right_index: { x: 1728, y: 972 }, // normalized 0.9, 0.9
+  };
+  const holds = [
+    { bbox_x: 0.05, bbox_y: 0.05, bbox_w: 0.1, bbox_h: 0.1 },
+    { bbox_x: 0.85, bbox_y: 0.85, bbox_w: 0.1, bbox_h: 0.1 },
+  ];
+
+  const matched = nearestHoldsFor(landmarks, CONTACT_LANDMARKS, holds, 1920, 1080);
+  assert.equal(matched.left_index.index, 0);
+  assert.equal(matched.right_index.index, 1);
+  // Absent landmarks yield null rather than throwing.
+  assert.equal(matched.left_foot_index, null);
+});
+
+test('the contact landmarks exist in the 33-landmark set', () => {
+  for (const name of CONTACT_LANDMARKS) {
+    assert.ok(CSV_LANDMARK_ORDER.includes(name), `${name} is not a stored landmark`);
+    // And none of them existed in the old 15-landmark format.
+    assert.ok(!LEGACY_LANDMARK_ORDER.includes(name), `${name} unexpectedly legacy`);
   }
 });

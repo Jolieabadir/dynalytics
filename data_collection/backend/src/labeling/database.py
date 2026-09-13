@@ -135,22 +135,27 @@ class Database:
                 return row['version'] if row and row['version'] is not None else 0
 
     def apply_schema_sql(self, sql_path: Optional[str] = None):
-        """Execute the v3 migration file.
+        """Execute the migrations, in filename order.
 
         Used by the test suite to build a fresh schema. Production applies the
-        same file through `supabase db push`.
-        """
-        if sql_path is None:
-            candidates = sorted(
-                Path(__file__).resolve().parents[2].glob('supabase/migrations/*_schema_v3.sql')
-            )
-            if not candidates:
-                raise FileNotFoundError('No *_schema_v3.sql migration found')
-            sql_path = str(candidates[-1])
+        same files through `supabase db push`.
 
-        sql = Path(sql_path).read_text()
+        Applies every migration rather than only the base schema: additive
+        migrations land in their own files, and a test database built from the
+        base alone would be missing their columns.
+        """
+        if sql_path is not None:
+            paths = [Path(sql_path)]
+        else:
+            paths = sorted(
+                Path(__file__).resolve().parents[2].glob('supabase/migrations/*.sql')
+            )
+            if not paths:
+                raise FileNotFoundError('No migrations found under supabase/migrations/')
+
         with self.get_connection() as conn:
-            conn.execute(sql)
+            for path in paths:
+                conn.execute(path.read_text())
 
     # ==================== VIDEO OPERATIONS ====================
 
@@ -161,9 +166,10 @@ class Database:
             cursor.execute('''
                 INSERT INTO videos (
                     user_id, filename, fps, total_frames, duration_ms,
+                    width, height,
                     r2_video_key, r2_pose_csv_key, r2_export_key, uploaded_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             ''', (
                 video.user_id,
@@ -171,6 +177,8 @@ class Database:
                 video.fps,
                 video.total_frames,
                 video.duration_ms,
+                video.width,
+                video.height,
                 video.r2_video_key,
                 video.r2_pose_csv_key,
                 video.r2_export_key,
@@ -665,6 +673,10 @@ class Database:
             fps=row['fps'],
             total_frames=row['total_frames'],
             duration_ms=row['duration_ms'],
+            # .get so a database still on v3 (no dimensions migration) reads back
+            # as unknown rather than raising.
+            width=row.get('width'),
+            height=row.get('height'),
             r2_video_key=row['r2_video_key'],
             r2_pose_csv_key=row['r2_pose_csv_key'],
             r2_export_key=row['r2_export_key'],

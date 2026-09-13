@@ -593,3 +593,136 @@ wanting the face or hand points reads them from the CSV, where they still are.
 Incidentally this removed one pre-existing lint error (an unused loop variable in the old
 `Object.entries` iteration), taking `SkeletonOverlay.jsx` from 5 problems to 4. The
 remaining 4 are pre-existing hoisting and dependency-array warnings, untouched.
+
+---
+
+## 11. Coordinate spaces: landmarks vs hold boxes (follow-up)
+
+### 11.1 The mismatch
+
+Pose landmarks are stored as **pixels** at source resolution — `computeResult`
+multiplies MediaPipe's normalized output by `videoWidth`/`videoHeight` (§1.4). Hold
+bounding boxes are stored **normalized 0–1** (`public.holds`: `bbox_* CHECK (>= 0 AND
+<= 1)`). Comparing them directly is meaningless.
+
+It is worse than a scale factor. Every box looks ~200+ units away from every landmark,
+so the ranking collapses to "whichever box extends furthest right and down", because
+that shrinks the pixel gap fractionally. A hold the hand is **literally inside** loses to
+one on the opposite corner of the wall. There is a test pinning exactly that.
+
+### 11.2 ⚠️ The nearest-box comparison does not exist yet
+
+**There is no hold-matching code anywhere in this repo**, and there was none before this
+change. Checked:
+
+- **Frontend** — no bbox or nearest-box logic. The `hold_type_reaching` /
+  `hold_type_non_reaching` / `hold_quality` fields in `MoveForm` and the store are Lens-1
+  *taxonomy dropdowns*, unrelated to bounding boxes.
+- **Backend** — `/api/holds` is CRUD only: create, list-by-video, delete. No distance,
+  nearest, or matching logic in any Python file.
+
+So there was nothing to fix. What this adds is the **primitives, with the units handled
+correctly**, so whoever builds the feature does not rediscover the bug:
+
+| Added | Purpose |
+|---|---|
+| `poseMath.normalizeLandmark(lm, w, h)` | Pixel → normalized. Divides `x`/`y` only. |
+| `poseMath.normalizeLandmarks(map, w, h)` | Whole landmark map; skips internal `_com`. |
+| `holdMatching.distanceToBox(point, box)` | Point-to-rectangle, 0 inside. |
+| `holdMatching.isInsideBox(point, box)` | Containment. |
+| `holdMatching.nearestHold(lm, holds, w, h, opts)` | Normalizes, then ranks. `maxDistance` in normalized units. |
+| `holdMatching.nearestHoldsFor(...)` | Several landmarks at once. |
+| `holdMatching.CONTACT_LANDMARKS` | The four fingertip/toe points that touch holds. |
+
+`src/services/holdMatching.js` is marked **NOT WIRED UP** at the top of the file. It is
+tested but unreferenced by the app.
+
+Two deliberate choices:
+
+- **`z` is never divided.** MediaPipe's `z` is a depth estimate on roughly the same scale
+  as normalized `x`, and is stored unmultiplied, so dividing it by a pixel dimension
+  would corrupt it. A test pins this.
+- **Unknown frame size returns `null`, it does not guess.** Rows registered before §11.3
+  have no dimensions. Assuming 1920×1080 would produce a confident, wrong answer; `null`
+  forces the caller to skip the comparison.
+
+`CONTACT_LANDMARKS` is `left_index`, `right_index`, `left_foot_index`, `right_foot_index`
+— fingertips and toes rather than wrists and heels, since those sit far closer to the
+hold actually being used. **These only exist because of the §9 widening**; the
+15-landmark format had no fingertip or toe, so accurate contact matching was not possible
+before it.
+
+### 11.3 Backend: extras are silently dropped, so a migration was required
+
+**Checked first, as asked: the backend does *not* store unknown JSON fields.** No
+pydantic model sets `model_config` or `extra=`, so pydantic v2's default `extra='ignore'`
+applies. Verified empirically against the installed pydantic 2.12.5:
+
+```python
+class M(BaseModel): a: int
+M(**{'a': 1, 'width': 1920}).model_dump()   # -> {'a': 1}
+```
+
+`width` and `height` would have been **accepted and silently discarded** — no error, no
+warning, nothing stored. So the migration was necessary.
+
+**`supabase/migrations/20260913180000_add_video_dimensions.sql`** adds nullable
+`width`/`height` `integer` columns to `public.videos`, with `CHECK (… IS NULL OR … > 0)`.
+Additive and nullable, because rows written before it must stay valid.
+
+Two traps this had to avoid, neither obvious from the migration alone:
+
+1. **`check_schema()` requires an *exact* match** against `SCHEMA_VERSION` (`!=`, not
+   `<`). Bumping `schema_version` to 4 would make the API **refuse to start** against any
+   database that had not yet had this file applied, and would break
+   `test_schema_version_is_three`. The migration therefore **does not bump
+   `schema_version`** — it is purely additive and nullable, so a v3 reader is unaffected.
+   That decision is commented in the migration file.
+2. **`apply_schema_sql()` globbed `*_schema_v3.sql` only**, applying just the base file.
+   The test suite builds its schema through it, so a test database would have been left
+   without the new columns and every video-creating test would have failed on an
+   unknown column. It now applies **every** `supabase/migrations/*.sql` in filename
+   order. This was a latent limitation: any future additive migration would have hit it.
+
+Plumbed through: `models.Video` (`Optional[int]`), `database.create_video` and
+`_row_to_video` (via `row.get`, so a database still on v3 reads back as unknown rather
+than raising), `api.VideoRegister` (optional, `gt=0`), `api.VideoResponse`,
+`video_to_response`, and the register insert.
+
+**This is the one additional backend change**, and it is confined to those files plus the
+new migration. Nothing else in the backend was touched.
+
+### 11.4 Frontend plumbing
+
+`extractFromFile` already returned `width`/`height`; they are now sent in the register
+payload and kept on the store's video object. `setCurrentVideo` falls back to the
+measured values when the response echoes `null`, so a frontend running against a backend
+that has not yet applied the migration still has the dimensions in memory for the
+session.
+
+### 11.5 Verification
+
+**Frontend: 48 tests pass** (was 36). The 12 new ones cover normalization (including `z`
+untouched and the round-trip back to MediaPipe's input), refusal on unknown frame size,
+point-to-rectangle distance, containment agreeing with zero distance, `maxDistance` in
+normalized units, per-landmark matching, the contact landmarks existing in the 33-set —
+and the divergence test that pins the bug itself.
+
+**Backend: 61 tests pass**, run against a throwaway local Postgres, *not* the live
+Supabase project — the v3 migration `DROP`s and recreates the labeling tables, so running
+the suite against production data would destroy it. Plain Postgres needs a small `auth`
+schema shim (`auth.uid()`, `auth.role()`) for the RLS policies; with that in place the
+suite is green, including `test_schema_version_is_three`, which still passes precisely
+because the version was not bumped.
+
+Round-trip checked directly against the migrated table: `width`/`height` store and read
+back as `1920`/`1080`; a video registered without them reads back `None`/`None`; and
+`width=0` is rejected by the `CHECK` constraint.
+
+### 11.6 Coordination note
+
+The backend files touched here (`models.py`, `database.py`, `api.py`) are the same ones
+the Supabase/R2 session is working in on `feat/supabase-r2-schema-v3`. **These edits are
+small and additive, but they will need a careful merge** if that branch has moved. The
+`apply_schema_sql` change in particular alters shared behaviour — it now applies all
+migrations rather than only the base schema.

@@ -28,6 +28,10 @@ class Video:
     fps: float = 0.0
     total_frames: int = 0
     duration_ms: float = 0.0
+    # Intrinsic frame size in pixels. None for rows registered before the
+    # dimensions migration; readers must treat that as "unknown", not a default.
+    width: Optional[int] = None
+    height: Optional[int] = None
     r2_video_key: Optional[str] = None
     r2_pose_csv_key: Optional[str] = None
     r2_export_key: Optional[str] = None

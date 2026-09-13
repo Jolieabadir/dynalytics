@@ -384,3 +384,57 @@ export function framesToCSV(frames) {
 
   return rows.join('\n');
 }
+
+// ==================== COORDINATE SPACES ====================
+
+/**
+ * Landmarks are stored as PIXELS; hold boxes are stored NORMALIZED 0-1.
+ *
+ * `computeResult` multiplies MediaPipe's normalized output by the source
+ * `videoWidth`/`videoHeight`, so `landmark_*_x` / `landmark_*_y` in the CSV are
+ * pixels at the original resolution. `public.holds` stores `bbox_*` as
+ * fractions of the frame. The two cannot be compared without dividing the
+ * landmarks back down by the frame size first — a 1920x1080 wrist at x=960 and
+ * a hold at bbox_x=0.5 are the same place, and comparing 960 against 0.5
+ * silently makes every hold look infinitely far away.
+ *
+ * Note `z` is NOT divided. MediaPipe's z is a depth estimate on roughly the
+ * same scale as normalized x, never multiplied by a pixel dimension, so
+ * dividing it here would corrupt it.
+ *
+ * @param {{x: number, y: number, z?: number, visibility?: number}} landmark
+ * @param {number} width intrinsic video width in pixels
+ * @param {number} height intrinsic video height in pixels
+ * @returns {{x: number, y: number, z?: number, visibility?: number}|null}
+ *   null when the frame size is unknown — callers must skip the comparison
+ *   rather than assume a resolution.
+ */
+export function normalizeLandmark(landmark, width, height) {
+  if (!landmark) return null;
+  if (!(width > 0) || !(height > 0)) return null;
+  return {
+    ...landmark,
+    x: landmark.x / width,
+    y: landmark.y / height,
+  };
+}
+
+/**
+ * Normalize a whole landmark map (the shape `computeResult` returns, or a row
+ * parsed out of the CSV).
+ *
+ * Returns null when the frame size is unknown, so a missing width/height fails
+ * loudly at the call site instead of producing plausible-looking nonsense.
+ */
+export function normalizeLandmarks(landmarks, width, height) {
+  if (!landmarks) return null;
+  if (!(width > 0) || !(height > 0)) return null;
+
+  const out = {};
+  for (const [name, lm] of Object.entries(landmarks)) {
+    if (name.startsWith('_')) continue; // internal, e.g. _com
+    const n = normalizeLandmark(lm, width, height);
+    if (n) out[name] = n;
+  }
+  return out;
+}

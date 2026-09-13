@@ -105,7 +105,7 @@ function VideoUpload() {
       const blobUrl = URL.createObjectURL(file);
       setVideoBlobUrl(blobUrl);
 
-      const { rows, fps, totalFrames, duration } = await extractor.extractFromFile(file, {
+      const { rows, fps, totalFrames, duration, width, height } = await extractor.extractFromFile(file, {
         onState: (state) => {
           setPhase(state);
           setStatus(STATE_LABEL[state] || '');
@@ -138,6 +138,10 @@ function VideoUpload() {
           fps,
           total_frames: totalFrames,
           duration_ms: duration * 1000,
+          // Landmarks are stored as pixels at this resolution; without these,
+          // they can never be normalized against hold boxes after the fact.
+          width,
+          height,
           csv_data: csvString,
         },
         {
@@ -158,7 +162,14 @@ function VideoUpload() {
         console.warn('[VideoUpload] Original video upload failed; pose data is saved.', uploadErr);
       }
 
-      setCurrentVideo(videoData);
+      // Fall back to the measured values: a backend that predates the
+      // dimensions migration echoes them back as null, and the store is where
+      // hold-box normalization will read them from.
+      setCurrentVideo({
+        ...videoData,
+        width: videoData.width ?? width,
+        height: videoData.height ?? height,
+      });
       setMoves(await getMoves(videoData.id));
     } catch (err) {
       if (err instanceof ExtractionCancelledError || err?.name === 'ExtractionCancelled') {
