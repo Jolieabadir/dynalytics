@@ -69,6 +69,44 @@ The labeling tables were truncated afterwards, so the database is empty.
 
 ---
 
+## ⛔ Second update — R2 and Railway are still not available
+
+A follow-up pass was requested on the premise that R2 credentials were in
+`.env` and Railway was linked. Neither holds:
+
+| Check | Command | Result |
+|---|---|---|
+| R2 credentials | read `.env` | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` are all present as keys but set to **empty strings**. The file has not been modified since it was written. |
+| Railway linked | `railway status` | **"No linked project found."** The CLI's stored link state covers only `/Users/jolie/Downloads/Steap`, `.../Steap-semester` and a Steap scratchpad — nothing under Dynalytics. |
+| `wrangler` | `which wrangler` | **Still not installed.** |
+
+No other file on disk holds R2 credentials (searched every `.env*` in the repo).
+So testing R2 against a real bucket, applying the bucket CORS rule, setting
+Railway variables, deploying, and smoke-testing a deployed URL all remain
+impossible.
+
+**What was done instead**, so that none of it needs figuring out later:
+
+- `src/storage/r2.py` gained `delete_object()`, `put_bucket_cors()` and
+  `get_bucket_cors()`. R2 implements the S3 CORS API, so wrangler is not needed
+  at all.
+- `scripts/verify_r2.py` implements both R2 steps as one command. It covers
+  `put_object`, `object_exists` (hit and miss), `get_object_stream` (byte
+  comparison, plus `FileNotFoundError` on a missing key), a real
+  credential-free HTTP PUT to a presigned URL, a presigned GET, then
+  `PutBucketCors` from `r2-cors.json` and `GetBucketCors` read-back asserting
+  PUT, GET and `http://localhost:5173` are permitted. It cleans up after itself
+  and never prints a credential.
+- `r2-cors.json` allows `GET`, `PUT`, `HEAD`. `AllowedOrigins` is `["*"]`
+  because that is literally what `api.py`'s CORS config is
+  (`allow_origins=["*"]`) — which already subsumes `http://localhost:5173`.
+  Narrow both together once the deployed frontend origin is known.
+
+The 61-test suite still passes against the live Supabase database after these
+changes.
+
+---
+
 ## ⚠️ Blockers found at step 0 (read this first)
 
 The brief stated the Supabase and Railway CLIs were already linked and that all
@@ -526,11 +564,11 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 |---|---|---|
 | 3 — `supabase db push` | **DONE** | Applied to the new dedicated project `dynalytix-climbing`. |
 | 3 — verify tables via psql against `DATABASE_URL` | **DONE** | Against the live database: 7 tables, RLS on all, 4 policies each, `schema_version = 3`. |
-| 4 — R2 bucket + CORS | **Not done** | `wrangler` not installed, no R2 credentials. CORS JSON provided in §6. |
+| 4 — R2 bucket + CORS | **Still blocked** | The four `R2_*` keys in `.env` are empty strings. Implemented as `scripts/verify_r2.py` (S3 `PutBucketCors`, no wrangler needed) — one command once credentials exist. |
 | 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
 | 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
 | 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
-| 8 — `railway variables --set`, `railway up`, health check on the deployment | **Not done** | No linked project, and no values exist for `DATABASE_URL` or any `R2_*` variable. Seven projects with generated names are visible; guessing which hosts this backend and deploying a breaking API change to it was not a safe autonomous call. |
+| 8 — `railway variables --set`, `railway up`, health check | **Still blocked** | `railway status`: "No linked project found". `DATABASE_URL` is now available, but the R2 values are not, and the project to link is still unknown. Deploying a breaking API change to a guessed project was not a safe autonomous call. |
 | 9 — smoke test against the deployed URL | **Partly done** | No deployment URL yet. Ran against the real app locally, using real ES256 tokens and the live Supabase database: 35 passed, 0 failed. R2 stubbed. |
 
 Nothing about the application code is unverified — every module is exercised by
@@ -547,14 +585,35 @@ In order:
 
 ~~2. Add `DATABASE_URL` to `.env`.~~ **Done** — points at the transaction pooler.
 
-3. **Create the R2 bucket and API token**, add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` to `.env`, and apply the CORS rule from §6.
+3. **R2 — still blocked, nothing supplied yet.** The four `R2_*` keys exist in
+   `.env` but are all **empty strings**. Create a Cloudflare R2 bucket and an
+   API token (R2 → Manage R2 API Tokens → Object Read & Write), fill the four
+   values in, then run:
+   ```bash
+   cd data_collection/backend
+   set -a && . ./.env && set +a
+   python scripts/verify_r2.py
+   ```
+   That one command does both of the R2 steps: it exercises `put_object`,
+   `object_exists`, `get_object_stream`, a real credential-free HTTP PUT to a
+   presigned URL and a presigned GET, then applies `r2-cors.json` with
+   `PutBucketCors` and reads it back with `GetBucketCors`, asserting PUT, GET
+   and `http://localhost:5173` are permitted. It cleans up after itself. It
+   uses the S3 API rather than wrangler, which is still not installed.
 4. ~~Run the suite for real.~~ **Done** — 61 passed against the live database.
    Note for future runs: the suite re-applies the migration, which **drops and
    recreates** the labeling tables. That was safe on an empty project. Once real
    labels exist, point `TEST_DATABASE_URL` at a separate throwaway database.
-5. **Link Railway and set the variables** (values from `.env`, never echoed):
+5. **Railway — still blocked, not linked.** `railway status` reports "No linked
+   project found"; the CLI's link state on this machine covers only three
+   *Steap* directories. You are authenticated, and seven projects are visible,
+   but their names are auto-generated and none identifies this backend. Picking
+   one and deploying a breaking API change to it was not a safe guess to make
+   unattended, so link it yourself first:
    ```bash
+   cd data_collection/backend
    railway link                       # pick the project hosting this backend
+   railway status                     # confirm
    railway variables --set DATABASE_URL="..." \
                      --set SUPABASE_URL="..." \
                      --set SUPABASE_ANON_KEY="..." \
@@ -567,6 +626,9 @@ In order:
    railway variables --unset DATA_REPO
    railway up
    ```
+   Note `SUPABASE_JWT_SECRET` is deliberately absent — this project signs with
+   ES256 and the key is discovered from `SUPABASE_URL`. Use the **transaction
+   pooler** `DATABASE_URL` (port 6543); the direct host is IPv6-only.
 6. **Verify the deployment:**
    ```bash
    curl https://<service>.up.railway.app/api/health

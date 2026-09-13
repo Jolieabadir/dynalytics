@@ -193,6 +193,39 @@ def presigned_put_url(key: str, content_type: Optional[str] = None, expires_in: 
     )
 
 
+def delete_object(key: str) -> bool:
+    """Delete an object. Returns True when the call succeeds."""
+    get_client().delete_object(Bucket=bucket_name(), Key=key)
+    return True
+
+
+def put_bucket_cors(rules: list) -> dict:
+    """Apply a CORS configuration to the bucket.
+
+    R2 implements the S3 PutBucketCors API, so this is the wrangler-free way to
+    set the rule. `rules` is a list of dicts using the S3 key names
+    (AllowedOrigins, AllowedMethods, AllowedHeaders, ExposeHeaders,
+    MaxAgeSeconds).
+    """
+    return get_client().put_bucket_cors(
+        Bucket=bucket_name(),
+        CORSConfiguration={'CORSRules': rules},
+    )
+
+
+def get_bucket_cors() -> list:
+    """Read the bucket's CORS rules back. Empty list when none are set."""
+    try:
+        response = get_client().get_bucket_cors(Bucket=bucket_name())
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') in (
+            'NoSuchCORSConfiguration', 'NoSuchCORSConfigurationError', '404',
+        ):
+            return []
+        raise
+    return response.get('CORSRules', [])
+
+
 def presigned_get_url(key: str, expires_in: int = 3600, download_filename: Optional[str] = None) -> str:
     """Presigned URL for reading an object.
 
