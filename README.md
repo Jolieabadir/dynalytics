@@ -95,10 +95,9 @@ Focus: Building the foundation for quality training data
 | Movement Assessment Tool | `fms-demo` | Deployed on Railway |
 
 ### Data Pipeline
-- Labels are stored in Supabase Postgres, scoped per user
-- Videos, raw pose CSVs and labeled exports are stored in Cloudflare R2
-- Requires `DATABASE_URL`, `SUPABASE_JWT_SECRET` and the `R2_*` variables
-- The GitHub CSV auto-sync has been retired
+- Labeled CSVs auto-sync to GitHub (`dynalytix-data` repo)
+- Requires `GITHUB_TOKEN` and `DATA_REPO` environment variables
+- Data stored in `collected_data/climbing/` folder
 
 ## Tracked Measurements
 
@@ -166,16 +165,16 @@ dynalytics/
 │   ├── backend/                # FastAPI server
 │   │   ├── src/
 │   │   │   ├── labeling/
-│   │   │   │   ├── models.py       # Video, Hold, Move, FrameTag dataclasses
-│   │   │   │   ├── database.py     # Postgres operations (psycopg v3)
-│   │   │   │   └── exporter.py     # Label + pose CSV merger (R2 in/out)
-│   │   │   ├── storage/
-│   │   │   │   └── r2.py           # Cloudflare R2 client
+│   │   │   │   ├── models.py       # Video, Move, FrameTag dataclasses
+│   │   │   │   ├── database.py     # SQLite operations
+│   │   │   │   ├── exporter.py     # Label + pose CSV merger
+│   │   │   │   └── data_sync.py    # GitHub auto-sync
 │   │   │   └── web/
-│   │   │       ├── api.py          # REST endpoints
-│   │   │       └── auth.py         # Supabase JWT verification
-│   │   └── supabase/
-│   │       └── migrations/         # Schema v3 SQL
+│   │   │       └── api.py          # REST endpoints
+│   │   ├── data/
+│   │   │   ├── labels.db           # SQLite database
+│   │   │   └── exports/            # ML-ready labeled CSVs
+│   │   └── videos/                 # Uploaded videos (temp, deleted after export)
 │   └── frontend/               # React app
 │       └── src/
 │           ├── components/

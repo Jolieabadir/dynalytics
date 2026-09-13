@@ -13,13 +13,6 @@
  */
 import { create } from 'zustand';
 
-/**
- * The four hold slots an environment can reference, in the order the form
- * shows them. Mirrors HOLD_SLOTS in the backend's models.py; /api/config
- * serves the same list as `hold_slots` and is the runtime source of truth.
- */
-export const HOLD_SLOT_KEYS = ['start_left', 'start_right', 'end', 'foot'];
-
 const useStore = create((set, get) => ({
   // ==================== VIDEO STATE ====================
   currentVideo: null,
@@ -108,91 +101,22 @@ const useStore = create((set, get) => ({
   setConfig: (config) => set({ config }),
 
   // ==================== PREVIOUS ENVIRONMENT (Lens 1 prefill) ====================
-  // Last environment values, prefilled into the next move. Schema v3 shape:
-  // wall angle plus four named hold slots. Only wall_angle and the hold types
-  // and qualities carry over — hold_id never does, because the next move is on
-  // different holds.
+  // Stores the last environment values to prefill for new moves
   previousEnvironment: {
     wall_angle: '',
-    start_left: { hold_id: null, hold_type: '', hold_quality: [] },
-    start_right: { hold_id: null, hold_type: '', hold_quality: [] },
-    end: { hold_id: null, hold_type: '', hold_quality: [] },
-    foot: { hold_id: null, hold_type: '', hold_quality: [] },
+    hold_type_reaching: '',
+    hold_type_non_reaching: '',
+    hold_quality: [],
   },
 
   setPreviousEnvironment: (env) =>
     set({
       previousEnvironment: {
         wall_angle: env.wall_angle || '',
-        ...Object.fromEntries(
-          HOLD_SLOT_KEYS.map((slot) => [
-            slot,
-            {
-              // Deliberately dropped: the next move is on different holds, so
-              // carrying an id over would point at the wrong box.
-              hold_id: null,
-              hold_type: env[slot]?.hold_type || '',
-              hold_quality: env[slot]?.hold_quality || [],
-            },
-          ])
-        ),
+        hold_type_reaching: env.hold_type_reaching || '',
+        hold_type_non_reaching: env.hold_type_non_reaching || '',
+        hold_quality: env.hold_quality || [],
       },
-    }),
-
-  // ==================== HOLDS ====================
-  // Bounding boxes normalized 0-1, per video. Landmarks are stored in pixels,
-  // so anything comparing the two must normalize first (services/holdMatching,
-  // which is the single source of that geometry).
-  holds: [],
-  showHoldOverlay: true,
-  // When set, clicking a box on the video assigns it to this MoveForm slot.
-  holdPickSlot: null,
-
-  setHolds: (holds) => set({ holds }),
-  addHold: (hold) => set((state) => ({ holds: [...state.holds, hold] })),
-  addHolds: (holds) => set((state) => ({ holds: [...state.holds, ...holds] })),
-  removeHold: (holdId) =>
-    set((state) => ({ holds: state.holds.filter((h) => h.id !== holdId) })),
-  setShowHoldOverlay: (show) => set({ showHoldOverlay: show }),
-  setHoldPickSlot: (slot) => set({ holdPickSlot: slot }),
-
-  // ==================== ONBOARDING BANNERS ====================
-  // Session-only by design: no localStorage. A labeler who reloads is starting
-  // over anyway, and the reminder costs one click to dismiss.
-  dismissedBanners: {},
-
-  dismissBanner: (key) =>
-    set((state) => ({
-      dismissedBanners: { ...state.dismissedBanners, [key]: true },
-    })),
-
-  isBannerDismissed: (key) => Boolean(get().dismissedBanners[key]),
-
-  // ==================== AUTH ====================
-  session: null,
-  setSession: (session) => set({ session }),
-
-  // Everything video-scoped, cleared on sign-out so the next user starts clean.
-  resetForSignOut: () =>
-    set({
-      session: null,
-      currentVideo: null,
-      videos: [],
-      videoBlobUrl: null,
-      csvData: null,
-      csvString: null,
-      moves: [],
-      currentMove: null,
-      frameTags: [],
-      holds: [],
-      holdPickSlot: null,
-      currentFrame: 0,
-      isPlaying: false,
-      moveStart: null,
-      moveEnd: null,
-      mode: 'define',
-      showMoveForm: false,
-      dismissedBanners: {},
     }),
 }));
 

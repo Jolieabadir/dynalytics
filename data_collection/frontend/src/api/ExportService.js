@@ -1,15 +1,16 @@
 /**
- * ExportService - handles exporting labeled data.
- *
- * Thin re-export so the two existing call sites keep their import path. The
- * real implementations live in `client.js`, which owns the auth interceptor.
- *
- * v3 notes: export takes no query params (it no longer deletes the video as a
- * side effect), and the download is a presigned R2 URL rather than a streamed
- * body.
+ * ExportService - handles exporting labeled data
  */
-export { exportVideo, getExportDownloadUrl, downloadExport } from './client';
+import api from './client';
 
-import { exportVideo, getExportDownloadUrl, downloadExport } from './client';
+/**
+ * Export labeled data for a video.
+ * @param {number} videoId - The video ID to export
+ * @param {boolean} deleteVideo - If true, delete the video file after export (default: true)
+ */
+export const exportVideo = async (videoId, deleteVideo = true) => {
+  const response = await api.post(`/api/videos/${videoId}/export?delete_video=${deleteVideo}`);
+  return response.data;
+};
 
-export default { exportVideo, getExportDownloadUrl, downloadExport };
+export default { exportVideo };

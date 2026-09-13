@@ -1,29 +1,24 @@
 /**
- * MoveForm — the labeling panel.
+ * MoveForm component.
  *
- * Two structural changes from the modal it replaces:
+ * Three-lens labeling flow:
+ * - Lens 1: Environment (wall angle, hold types, hold quality)
+ * - Lens 2: Strategy (approach, size, move tags, form quality, effort)
+ * - Lens 3: Outcome (result, reach detail, foot cut, confidence)
  *
- * 1. It is a right-side panel, not a full-screen overlay. The labeler can see
- *    the movement, the skeleton, and the scrub bar while deciding what to call
- *    it — which is exactly when they need to look at it.
- * 2. Environment is four named hold slots (start-left, start-right, end, foot)
- *    rather than "reaching" and "non-reaching" hands, matching schema v3.
- *
- * Every option carries an "i" with a plain-language definition from
- * /api/config. Nothing requires reading them.
- *
- * All taxonomy comes from /api/config — no hardcoded values.
+ * All taxonomy comes from /api/config - no hardcoded values.
  */
 import { useState, useEffect } from 'react';
-import useStore, { HOLD_SLOT_KEYS } from '../store/useStore';
-import { fpsOf, frameToTime, frameToMs } from '../utils/frames';
-import { optionLabel, optionDescription } from '../utils/taxonomy';
-import { suggestHoldSlots } from '../services/holdAssignment';
-import InfoTip from './InfoTip';
-import { createMove, createEnvironment, createOutcome, deleteMove } from '../api/client';
+import useStore from '../store/useStore';
+import {
+  createMove,
+  createEnvironment,
+  createOutcome,
+  getConfig,
+  deleteMove,
+} from '../api/client';
 
-// Form quality anchor text. Not taxonomy — these are scale anchors for a
-// 1-5 rating, and the backend stores the number.
+// Form quality anchor text
 const FORM_QUALITY_LABELS = {
   1: 'Failed',
   2: 'Clear compensation',
@@ -32,40 +27,49 @@ const FORM_QUALITY_LABELS = {
   5: 'Excellent, repeatable under greater demand',
 };
 
-const EMPTY_SLOT = { hold_id: null, hold_type: '', hold_quality: [], suggested: false };
-
-const SLOT_ORDER = HOLD_SLOT_KEYS;
-
-/** Slots that must be filled for a normal move. `foot` is optional by design. */
-const REQUIRED_SLOTS = ['start_left', 'start_right', 'end'];
+// Required config keys for this component
+const REQUIRED_CONFIG_KEYS = [
+  'wall_angles',
+  'hold_types',
+  'hold_qualities',
+  'approaches',
+  'sizes',
+  'move_tags',
+  'timings',
+  'dyno_styles',
+  'results',
+  'reach_details',
+  'confidence_levels',
+];
 
 function MoveForm() {
   const {
     currentVideo,
     moveStart,
     moveEnd,
+    showMoveForm,
     setShowMoveForm,
     clearMoveSelection,
     addMove,
     previousEnvironment,
     setPreviousEnvironment,
-    config,
-    holdPickSlot,
-    setHoldPickSlot,
-    holds,
-    csvData,
   } = useStore();
+
+  const [config, setConfigState] = useState(null);
+  const [configError, setConfigError] = useState(null);
 
   // Lens 1: Environment
   const [wallAngle, setWallAngle] = useState('');
-  const [slots, setSlots] = useState(() =>
-    Object.fromEntries(SLOT_ORDER.map((s) => [s, { ...EMPTY_SLOT }]))
-  );
+  const [holdTypeReaching, setHoldTypeReaching] = useState('');
+  const [holdTypeNonReaching, setHoldTypeNonReaching] = useState('');
+  const [holdQuality, setHoldQuality] = useState([]);
 
   // Lens 2: Strategy
   const [approach, setApproach] = useState('');
   const [size, setSize] = useState('');
   const [moveTags, setMoveTags] = useState([]);
+  const [timing, setTiming] = useState('');
+  const [dynoStyle, setDynoStyle] = useState('');
   const [formQuality, setFormQuality] = useState(3);
   const [effortLevel, setEffortLevel] = useState(5);
   const [description, setDescription] = useState('');
@@ -73,175 +77,146 @@ function MoveForm() {
   // Lens 3: Outcome
   const [result, setResult] = useState('');
   const [reachDetail, setReachDetail] = useState('');
+  const [footCut, setFootCut] = useState(false);
   const [confidence, setConfidence] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // Reset on open, prefilling environment from the previous move.
-  useEffect(() => {
-    setWallAngle(previousEnvironment.wall_angle || '');
-    setSlots(
-      Object.fromEntries(
-        SLOT_ORDER.map((slot) => [
-          slot,
-          {
-            ...EMPTY_SLOT,
-            hold_type: previousEnvironment[slot]?.hold_type || '',
-            hold_quality: previousEnvironment[slot]?.hold_quality || [],
-          },
-        ])
-      )
+  // Validate config has all required keys
+  const validateConfig = (configData) => {
+    if (!configData || typeof configData !== 'object') {
+      return { valid: false, missing: ['Config is null or not an object'] };
+    }
+    const missing = REQUIRED_CONFIG_KEYS.filter(
+      (key) => !configData[key] || !Array.isArray(configData[key])
     );
-    setApproach('');
-    setSize('');
-    setMoveTags([]);
-    setFormQuality(3);
-    setEffortLevel(5);
-    setDescription('');
-    setResult('');
-    setReachDetail('');
-    setConfidence('');
-    setError(null);
-    // previousEnvironment is a stable object between saves; re-running on every
-    // identity change would wipe edits mid-form.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /**
-   * Auto-suggest a hold for each slot from the pose data.
-   *
-   * At the start frame the hands are on their starting holds; at the end frame
-   * the reaching hand is on the target. Suggestions are marked `suggested` and
-   * stay that way until the labeler touches the slot — so a wrong guess is
-   * visible rather than silently adopted.
-   *
-   * Runs once per open. A slot the labeler has already filled is left alone.
-   */
-  useEffect(() => {
-    if (!holds?.length || !csvData?.length) return;
-    if (moveStart === null || moveEnd === null) return;
-
-    // Without the original resolution the CSV's pixel coordinates cannot be
-    // normalized against normalized hold boxes. holdMatching refuses rather
-    // than guessing, so this bails early to say the same thing out loud: a
-    // video registered before the dimensions migration suggests nothing.
-    const width = currentVideo?.width;
-    const height = currentVideo?.height;
-    if (!(width > 0) || !(height > 0)) return;
-
-    const rowAt = (frame) =>
-      csvData.find((r) => Number(r.frame_number) === frame) ?? null;
-
-    const suggestion = suggestHoldSlots({
-      holds,
-      startRow: rowAt(moveStart),
-      endRow: rowAt(moveEnd),
-      width,
-      height,
-    });
-
-    setSlots((prev) => {
-      const next = { ...prev };
-      for (const slot of SLOT_ORDER) {
-        const id = suggestion[slot];
-        if (id != null && next[slot].hold_id == null && !next[slot].suggested) {
-          next[slot] = { ...next[slot], hold_id: id, suggested: true };
-        }
-      }
-      return next;
-    });
-    // Once per open: the suggestion is a starting point, not a live binding.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // A hold picked on the video lands in whichever slot asked for it.
-  useEffect(() => {
-    if (!holdPickSlot) return;
-    const assignedId = holdPickSlot.assignedHoldId;
-    if (assignedId == null) return;
-
-    setSlots((prev) => ({
-      ...prev,
-      [holdPickSlot.slot]: {
-        ...prev[holdPickSlot.slot],
-        hold_id: assignedId,
-        suggested: false,
-      },
-    }));
-    setHoldPickSlot(null);
-  }, [holdPickSlot, setHoldPickSlot]);
-
-  const handleClose = () => {
-    setHoldPickSlot(null);
-    setShowMoveForm(false);
+    return { valid: missing.length === 0, missing };
   };
 
-  const updateSlot = (slot, patch) =>
-    setSlots((prev) => ({
-      ...prev,
-      // Any manual edit means the labeler has looked at it: no longer merely suggested.
-      [slot]: { ...prev[slot], ...patch, suggested: false },
-    }));
+  // Load configuration
+  useEffect(() => {
+    const loadConfig = async () => {
+      try {
+        setConfigError(null);
+        const configData = await getConfig();
+        const validation = validateConfig(configData);
+        if (!validation.valid) {
+          setConfigError(`Missing config keys: ${validation.missing.join(', ')}`);
+          return;
+        }
+        setConfigState(configData);
+      } catch (err) {
+        console.error('Failed to load config:', err);
+        setConfigError(`Failed to load configuration: ${err.message}`);
+      }
+    };
+    if (showMoveForm && !config) {
+      loadConfig();
+    }
+  }, [showMoveForm, config]);
 
-  const toggleSlotQuality = (slot, quality) =>
-    setSlots((prev) => {
-      const current = prev[slot].hold_quality || [];
-      return {
-        ...prev,
-        [slot]: {
-          ...prev[slot],
-          hold_quality: current.includes(quality)
-            ? current.filter((q) => q !== quality)
-            : [...current, quality],
-          suggested: false,
-        },
-      };
-    });
+  // Reset form when opened, prefill environment from previous move
+  useEffect(() => {
+    if (showMoveForm) {
+      // Lens 1: Prefill from previous move's environment
+      setWallAngle(previousEnvironment.wall_angle || '');
+      setHoldTypeReaching(previousEnvironment.hold_type_reaching || '');
+      setHoldTypeNonReaching(previousEnvironment.hold_type_non_reaching || '');
+      setHoldQuality(previousEnvironment.hold_quality || []);
 
-  const clearSlot = (slot) =>
-    setSlots((prev) => ({ ...prev, [slot]: { ...EMPTY_SLOT } }));
+      // Lens 2: Reset to defaults
+      setApproach('');
+      setSize('');
+      setMoveTags([]);
+      setTiming('');
+      setDynoStyle('');
+      setFormQuality(3);
+      setEffortLevel(5);
+      setDescription('');
+
+      // Lens 3: Reset to defaults
+      setResult('');
+      setReachDetail('');
+      setFootCut(false);
+      setConfidence('');
+
+      setError(null);
+    }
+  }, [showMoveForm, previousEnvironment]);
+
+  const handleClose = () => {
+    setShowMoveForm(false);
+  };
 
   const toggleMoveTag = (tag) => {
     setMoveTags((prev) => {
       const isSelected = prev.includes(tag);
-      if (isSelected) return prev.filter((t) => t !== tag);
 
-      let newTags = [...prev, tag];
-      // no_hands and no_feet_on are mutually exclusive.
-      if (tag === 'no_hands') newTags = newTags.filter((t) => t !== 'no_feet_on');
-      if (tag === 'no_feet_on') newTags = newTags.filter((t) => t !== 'no_hands');
-      return newTags;
+      if (isSelected) {
+        // Unchecking
+        const newTags = prev.filter((t) => t !== tag);
+        // If unchecking dyno, clear dyno_style
+        if (tag === 'dyno') {
+          setDynoStyle('');
+        }
+        return newTags;
+      } else {
+        // Checking
+        let newTags = [...prev, tag];
+
+        // Mutual exclusion: no_hands and no_feet_on cannot both be selected
+        if (tag === 'no_hands' && prev.includes('no_feet_on')) {
+          newTags = newTags.filter((t) => t !== 'no_feet_on');
+        } else if (tag === 'no_feet_on' && prev.includes('no_hands')) {
+          newTags = newTags.filter((t) => t !== 'no_hands');
+        }
+
+        // If selecting no_hands, clear hold type fields
+        if (tag === 'no_hands') {
+          setHoldTypeReaching('');
+          setHoldTypeNonReaching('');
+        }
+
+        return newTags;
+      }
     });
   };
 
-  const noHandsSelected = moveTags.includes('no_hands');
+  const toggleHoldQuality = (quality) => {
+    setHoldQuality((prev) =>
+      prev.includes(quality)
+        ? prev.filter((q) => q !== quality)
+        : [...prev, quality]
+    );
+  };
 
   const handleSubmit = async () => {
+    // Validation
     if (!currentVideo || moveStart === null || moveEnd === null) {
       setError('Invalid move boundaries');
       return;
     }
+
+    // Lens 1 validation
+    // Hold types not required when no_hands is tagged (hands are off the wall)
+    const noHandsSelected = moveTags.includes('no_hands');
     if (!wallAngle) {
       setError('Please select Wall Angle');
       return;
     }
-    // Hands off the wall means no hand holds to name.
-    if (!noHandsSelected) {
-      const missing = REQUIRED_SLOTS.filter((s) => !slots[s].hold_type);
-      if (missing.length) {
-        setError(
-          `Please choose a hold type for: ${missing
-            .map((s) => optionLabel(config, 'hold_slots', s))
-            .join(', ')}`
-        );
-        return;
-      }
+    if (!noHandsSelected && (!holdTypeReaching || !holdTypeNonReaching)) {
+      setError('Please complete Hold Type fields');
+      return;
     }
+
+    // Lens 2 validation
     if (!approach || !size) {
       setError('Please select Approach and Size');
       return;
     }
+
+    // Lens 3 validation
     if (!result || !reachDetail || !confidence) {
       setError('Please complete all Outcome fields');
       return;
@@ -249,65 +224,66 @@ function MoveForm() {
 
     setLoading(true);
     setError(null);
+
     let createdMove = null;
 
     try {
-      const fps = fpsOf(currentVideo);
+      const fps = currentVideo.fps;
 
+      // Step 1: Create the move (Lens 2: Strategy)
       const moveData = {
         video_id: currentVideo.id,
         frame_start: moveStart,
         frame_end: moveEnd,
-        timestamp_start_ms: frameToMs(moveStart, fps),
-        timestamp_end_ms: frameToMs(moveEnd, fps),
-        approach,
-        size,
+        timestamp_start_ms: (moveStart / fps) * 1000,
+        timestamp_end_ms: (moveEnd / fps) * 1000,
+        approach: approach,
+        size: size,
         move_tags: moveTags,
+        timing: timing || null,
+        dyno_style: dynoStyle || null,
         form_quality: formQuality,
         effort_level: effortLevel,
-        confidence,
-        description,
+        tags: [],
+        description: description,
       };
+
       createdMove = await createMove(moveData);
 
-      // Four named slots. An empty slot is sent as {} — that is how no-hands,
-      // one-hand and no-feet moves are expressed.
-      const slotPayload = Object.fromEntries(
-        SLOT_ORDER.map((slot) => {
-          const s = slots[slot];
-          const isHandSlot = slot !== 'foot';
-          if (noHandsSelected && isHandSlot) return [slot, {}];
-          if (!s.hold_type && s.hold_id == null) return [slot, {}];
-          return [
-            slot,
-            {
-              hold_id: s.hold_id ?? null,
-              hold_type: s.hold_type || null,
-              hold_quality: s.hold_quality || [],
-            },
-          ];
-        })
-      );
+      // Step 2: Create the environment (Lens 1)
+      // When no_hands is selected, hold types should be null
+      const envData = {
+        move_id: createdMove.id,
+        wall_angle: wallAngle,
+        hold_type_reaching: noHandsSelected ? null : holdTypeReaching,
+        hold_type_non_reaching: noHandsSelected ? null : holdTypeNonReaching,
+        hold_quality: holdQuality,
+      };
 
-      const envData = { move_id: createdMove.id, wall_angle: wallAngle, ...slotPayload };
       await createEnvironment(envData);
 
-      await createOutcome({
+      // Step 3: Create the outcome (Lens 3)
+      const outcomeData = {
         move_id: createdMove.id,
-        result,
+        result: result,
         reach_detail: reachDetail,
-        confidence,
-      });
+        foot_cut: footCut,
+        confidence: confidence,
+      };
 
+      await createOutcome(outcomeData);
+
+      // Save environment for prefilling next move
       setPreviousEnvironment(envData);
+
+      // Success - add to list and close
       addMove(createdMove);
       clearMoveSelection();
-      setHoldPickSlot(null);
       setShowMoveForm(false);
     } catch (err) {
       console.error('Failed to create move:', err);
-      // Roll back a move whose environment or outcome failed, so a half-labeled
-      // move never enters the list.
+
+      // Rollback: if move was created but env/outcome failed, delete the move
       if (createdMove) {
         try {
           await deleteMove(createdMove.id);
@@ -315,290 +291,455 @@ function MoveForm() {
           console.error('Rollback failed:', rollbackErr);
         }
       }
-      setError(err.response?.data?.detail || 'Failed to create move. Please try again.');
+
+      setError(
+        err.response?.data?.detail || 'Failed to create move. Please try again.'
+      );
     } finally {
       setLoading(false);
     }
   };
 
-  if (!config) {
+  if (!showMoveForm) return null;
+
+  // Show loading state while config loads
+  if (!config && !configError) {
     return (
-      <aside className="move-form-panel">
-        <div className="move-form-loading">Loading configuration…</div>
-      </aside>
+      <div className="move-form-overlay">
+        <div className="move-form-modal">
+          <div className="move-form-loading">Loading configuration...</div>
+        </div>
+      </div>
     );
   }
 
-  const fps = fpsOf(currentVideo);
-  const frameCount = moveEnd !== null && moveStart !== null ? moveEnd - moveStart : 0;
-  const duration =
-    moveEnd !== null && moveStart !== null
-      ? frameToTime(frameCount, fps).toFixed(2)
-      : '0.00';
+  // Show error state if config failed to load
+  if (configError) {
+    return (
+      <div className="move-form-overlay">
+        <div className="move-form-modal">
+          <div className="move-form-header">
+            <h2>Configuration Error</h2>
+            <button onClick={handleClose} className="close-btn">
+              ✕
+            </button>
+          </div>
+          <div className="move-form-content">
+            <div className="error-message config-error">
+              <p><strong>Failed to load form configuration.</strong></p>
+              <p>{configError}</p>
+              <p>Please ensure the backend API is running and accessible.</p>
+            </div>
+          </div>
+          <div className="move-form-footer">
+            <button onClick={handleClose} className="btn-secondary">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-  /** One radio group, every option with its definition. */
-  const radioGroup = (taxonomyKey, name, value, onChange, options) => (
-    <div className="radio-group">
-      {(options ?? config[taxonomyKey] ?? []).map((opt) => (
-        <label key={opt} className="radio-label">
-          <input
-            type="radio"
-            name={name}
-            value={opt}
-            checked={value === opt}
-            onChange={() => onChange(opt)}
-          />
-          <span>{optionLabel(config, taxonomyKey, opt)}</span>
-          <InfoTip text={optionDescription(config, taxonomyKey, opt)} />
-        </label>
-      ))}
-    </div>
-  );
+  const fps = currentVideo?.fps || 30;
+  const duration =
+    moveEnd && moveStart ? ((moveEnd - moveStart) / fps).toFixed(2) : 0;
+  const frameCount = moveEnd && moveStart ? moveEnd - moveStart : 0;
 
   return (
-    <aside className="move-form-panel" data-testid="move-form-panel">
-      <div className="move-form-header">
-        <h2>Label Move</h2>
-        <button onClick={handleClose} className="close-btn" aria-label="Close labeling panel">
-          ✕
-        </button>
-      </div>
-
-      <div className="move-form-content">
-        <div className="move-info">
-          <p>
-            Frames: {moveStart} – {moveEnd} ({frameCount} frames, {duration}s)
-          </p>
+    <div className="move-form-overlay">
+      <div className="move-form-modal move-form-three-lens">
+        <div className="move-form-header">
+          <h2>Label Move</h2>
+          <button onClick={handleClose} className="close-btn">
+            ✕
+          </button>
         </div>
 
-        {error && <div className="error-message">{error}</div>}
-
-        {/* ---------- Lens 1: Environment ---------- */}
-        <div className="lens-section">
-          <h3 className="lens-title">🏔️ Environment</h3>
-
-          <div className="form-field">
-            <label className="form-label">Wall Angle</label>
-            {radioGroup('wall_angles', 'wall_angle', wallAngle, setWallAngle)}
+        <div className="move-form-content">
+          {/* Move Info */}
+          <div className="move-info">
+            <p>
+              Frames: {moveStart} - {moveEnd} ({frameCount} frames, {duration}s)
+            </p>
           </div>
 
-          {noHandsSelected && (
-            <p className="field-disabled-note">
-              Hand holds are disabled — “No Hands” is tagged for this move.
-            </p>
-          )}
+          {error && <div className="error-message">{error}</div>}
 
-          {SLOT_ORDER.map((slot) => {
-            const isHandSlot = slot !== 'foot';
-            if (noHandsSelected && isHandSlot) return null;
-            const s = slots[slot];
-            const picking = holdPickSlot?.slot === slot;
+          {/* Lens 1: Environment */}
+          <div className="lens-section">
+            <h3 className="lens-title">🏔️ Environment</h3>
 
-            return (
-              <fieldset key={slot} className="hold-slot" data-testid={`hold-slot-${slot}`}>
-                <legend className="hold-slot-legend">
-                  {optionLabel(config, 'hold_slots', slot)}
-                  {slot === 'foot' && <span className="optional-flag"> (optional)</span>}
-                  <InfoTip text={optionDescription(config, 'hold_slots', slot)} />
-                  {s.suggested && (
-                    <span className="suggested-flag" title="Auto-suggested from the pose data — confirm or change it">
-                      suggested
-                    </span>
-                  )}
-                </legend>
+            <div className="form-field">
+              <label className="form-label">Wall Angle</label>
+              <div className="radio-group">
+                {(config.wall_angles ?? []).map((angle) => (
+                  <label key={angle} className="radio-label">
+                    <input
+                      type="radio"
+                      name="wall_angle"
+                      value={angle}
+                      checked={wallAngle === angle}
+                      onChange={() => setWallAngle(angle)}
+                    />
+                    {formatLabel(angle)}
+                  </label>
+                ))}
+              </div>
+            </div>
 
-                <div className="hold-slot-pick">
-                  <button
-                    type="button"
-                    className={`pick-on-video-btn ${picking ? 'active' : ''}`}
-                    onClick={() =>
-                      setHoldPickSlot(picking ? null : { slot, assignedHoldId: null })
-                    }
-                  >
-                    {picking ? 'Click a box on the video…' : 'Pick on video'}
-                  </button>
-                  {s.hold_id != null && (
-                    <span className="picked-hold">
-                      Hold #{s.hold_id}
-                      <button
-                        type="button"
-                        className="unpick-btn"
-                        onClick={() => updateSlot(slot, { hold_id: null })}
-                        aria-label={`Unassign the hold from ${slot}`}
-                      >
-                        ✕
-                      </button>
-                    </span>
-                  )}
-                </div>
-
+            {/* Hold Type fields - disabled when no_hands is tagged */}
+            {moveTags.includes('no_hands') ? (
+              <div className="form-field disabled-field">
+                <label className="form-label">Hold Types</label>
+                <p className="field-disabled-note">
+                  Disabled — hands are off the wall for this move
+                </p>
+              </div>
+            ) : (
+              <>
                 <div className="form-field">
-                  <label className="form-label">Hold Type</label>
+                  <label className="form-label">
+                    {moveTags.includes('foot_move')
+                      ? 'Hold Type (Left Hand)'
+                      : 'Hold Type (Reaching Hand)'}
+                  </label>
                   <div className="radio-group">
                     {(config.hold_types ?? []).map((type) => (
                       <label key={type} className="radio-label">
                         <input
                           type="radio"
-                          name={`${slot}_hold_type`}
+                          name="hold_type_reaching"
                           value={type}
-                          checked={s.hold_type === type}
-                          onChange={() => updateSlot(slot, { hold_type: type })}
+                          checked={holdTypeReaching === type}
+                          onChange={() => setHoldTypeReaching(type)}
                         />
-                        <span>{optionLabel(config, 'hold_types', type)}</span>
-                        <InfoTip text={optionDescription(config, 'hold_types', type)} />
+                        {formatLabel(type)}
                       </label>
                     ))}
                   </div>
                 </div>
 
                 <div className="form-field">
-                  <label className="form-label">Hold Quality</label>
-                  <div className="checkbox-group">
-                    {(config.hold_qualities ?? []).map((quality) => (
-                      <label key={quality} className="checkbox-label">
+                  <label className="form-label">
+                    {moveTags.includes('foot_move')
+                      ? 'Hold Type (Right Hand)'
+                      : 'Hold Type (Non-Reaching Hand)'}
+                  </label>
+                  <div className="radio-group">
+                    {(config.hold_types ?? []).map((type) => (
+                      <label key={type} className="radio-label">
                         <input
-                          type="checkbox"
-                          checked={(s.hold_quality || []).includes(quality)}
-                          onChange={() => toggleSlotQuality(slot, quality)}
+                          type="radio"
+                          name="hold_type_non_reaching"
+                          value={type}
+                          checked={holdTypeNonReaching === type}
+                          onChange={() => setHoldTypeNonReaching(type)}
                         />
-                        <span>{optionLabel(config, 'hold_qualities', quality)}</span>
-                        <InfoTip text={optionDescription(config, 'hold_qualities', quality)} />
+                        {formatLabel(type)}
                       </label>
                     ))}
                   </div>
                 </div>
+              </>
+            )}
 
-                <button type="button" className="clear-slot-btn" onClick={() => clearSlot(slot)}>
-                  Clear this slot
-                </button>
-              </fieldset>
-            );
-          })}
+            <div className="form-field">
+              <label className="form-label">Hold Quality (multi-select)</label>
+              <div className="checkbox-group">
+                {(config.hold_qualities ?? []).map((quality) => (
+                  <label key={quality} className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={holdQuality.includes(quality)}
+                      onChange={() => toggleHoldQuality(quality)}
+                    />
+                    {formatLabel(quality)}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Lens 2: Strategy */}
+          <div className="lens-section">
+            <h3 className="lens-title">🎯 Strategy</h3>
+
+            <div className="form-field">
+              <label className="form-label">Approach</label>
+              <div className="radio-group">
+                {(config.approaches ?? []).map((a) => (
+                  <label key={a} className="radio-label">
+                    <input
+                      type="radio"
+                      name="approach"
+                      value={a}
+                      checked={approach === a}
+                      onChange={() => setApproach(a)}
+                    />
+                    {formatLabel(a)}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Size</label>
+              <div className="radio-group">
+                {(config.sizes ?? []).map((s) => (
+                  <label key={s} className="radio-label">
+                    <input
+                      type="radio"
+                      name="size"
+                      value={s}
+                      checked={size === s}
+                      onChange={() => setSize(s)}
+                    />
+                    {formatLabel(s)}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Move Tags (multi-select)</label>
+              <div className="tags-group">
+                {(config.move_tags ?? []).map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleMoveTag(tag)}
+                    className={`tag-btn ${moveTags.includes(tag) ? 'active' : ''} ${
+                      // Disable no_feet_on when no_hands is selected (and vice versa)
+                      (tag === 'no_feet_on' && moveTags.includes('no_hands')) ||
+                      (tag === 'no_hands' && moveTags.includes('no_feet_on'))
+                        ? 'disabled-mutual'
+                        : ''
+                    }`}
+                    disabled={
+                      (tag === 'no_feet_on' && moveTags.includes('no_hands')) ||
+                      (tag === 'no_hands' && moveTags.includes('no_feet_on'))
+                    }
+                    title={
+                      tag === 'deadpoint'
+                        ? 'Dynamic reach where at least one hand stays in contact'
+                        : tag === 'dyno'
+                          ? 'Dynamic move where all points of contact leave the wall'
+                          : tag === 'foot_move'
+                            ? 'Hands stay on their holds; feet do the work'
+                            : tag === 'no_hands'
+                              ? 'Hands are entirely off the wall'
+                              : undefined
+                    }
+                  >
+                    {formatLabel(tag)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Timing - always visible */}
+            <div className="form-field">
+              <label className="form-label">Timing (optional)</label>
+              <div className="radio-group">
+                <label className="radio-label">
+                  <input
+                    type="radio"
+                    name="timing"
+                    value=""
+                    checked={timing === ''}
+                    onChange={() => setTiming('')}
+                  />
+                  None
+                </label>
+                {(config.timings ?? []).map((t) => (
+                  <label key={t} className="radio-label">
+                    <input
+                      type="radio"
+                      name="timing"
+                      value={t}
+                      checked={timing === t}
+                      onChange={() => setTiming(t)}
+                    />
+                    {formatLabel(t)}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Dyno Style - only shown when dyno tag is selected */}
+            {moveTags.includes('dyno') && (
+              <div className="form-field">
+                <label className="form-label">Dyno Style</label>
+                <div className="radio-group">
+                  <label className="radio-label">
+                    <input
+                      type="radio"
+                      name="dyno_style"
+                      value=""
+                      checked={dynoStyle === ''}
+                      onChange={() => setDynoStyle('')}
+                    />
+                    None
+                  </label>
+                  {(config.dyno_styles ?? []).map((ds) => (
+                    <label key={ds} className="radio-label">
+                      <input
+                        type="radio"
+                        name="dyno_style"
+                        value={ds}
+                        checked={dynoStyle === ds}
+                        onChange={() => setDynoStyle(ds)}
+                      />
+                      {formatLabel(ds)}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="form-field">
+              <label className="form-label">Form Quality</label>
+              <div className="quality-buttons">
+                {[1, 2, 3, 4, 5].map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => setFormQuality(q)}
+                    className={`quality-btn ${formQuality === q ? 'active' : ''}`}
+                    title={FORM_QUALITY_LABELS[q]}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+              <div className="quality-description">
+                {FORM_QUALITY_LABELS[formQuality]}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Effort Level: {effortLevel}/10</label>
+              <input
+                type="range"
+                min="0"
+                max="10"
+                value={effortLevel}
+                onChange={(e) => setEffortLevel(Number(e.target.value))}
+                className="effort-slider"
+              />
+              <div className="effort-labels">
+                <span>Easy</span>
+                <span>Max Effort</span>
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Description (optional)</label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value.slice(0, 500))}
+                placeholder="Add notes about this move..."
+                className="description-textarea"
+                rows="2"
+              />
+            </div>
+          </div>
+
+          {/* Lens 3: Outcome */}
+          <div className="lens-section">
+            <h3 className="lens-title">📊 Outcome</h3>
+
+            <div className="form-field">
+              <label className="form-label">Result</label>
+              <div className="radio-group">
+                {(config.results ?? []).map((r) => (
+                  <label key={r} className="radio-label">
+                    <input
+                      type="radio"
+                      name="result"
+                      value={r}
+                      checked={result === r}
+                      onChange={() => setResult(r)}
+                    />
+                    {formatLabel(r)}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Reach Detail</label>
+              <div className="radio-group">
+                {(config.reach_details ?? []).map((rd) => (
+                  <label key={rd} className="radio-label">
+                    <input
+                      type="radio"
+                      name="reach_detail"
+                      value={rd}
+                      checked={reachDetail === rd}
+                      onChange={() => setReachDetail(rd)}
+                    />
+                    {formatLabel(rd)}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <label className="checkbox-label foot-cut-label">
+                <input
+                  type="checkbox"
+                  checked={footCut}
+                  onChange={(e) => setFootCut(e.target.checked)}
+                />
+                Foot Cut (feet came off during move)
+              </label>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Confidence</label>
+              <div className="radio-group">
+                {(config.confidence_levels ?? []).map((c) => (
+                  <label key={c} className="radio-label">
+                    <input
+                      type="radio"
+                      name="confidence"
+                      value={c}
+                      checked={confidence === c}
+                      onChange={() => setConfidence(c)}
+                    />
+                    {formatLabel(c)}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* ---------- Lens 2: Strategy ---------- */}
-        <div className="lens-section">
-          <h3 className="lens-title">🎯 Strategy</h3>
-
-          <div className="form-field">
-            <label className="form-label">Approach</label>
-            {radioGroup('approaches', 'approach', approach, setApproach)}
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">
-              Size
-              <InfoTip text="How big the movement is — not the size of the hold." />
-            </label>
-            {radioGroup('sizes', 'size', size, setSize)}
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">Move Tags (multi-select)</label>
-            <div className="tags-group">
-              {(config.move_tags ?? []).map((tag) => {
-                const blocked =
-                  (tag === 'no_feet_on' && moveTags.includes('no_hands')) ||
-                  (tag === 'no_hands' && moveTags.includes('no_feet_on'));
-                return (
-                  <span key={tag} className="tag-with-info">
-                    <button
-                      type="button"
-                      onClick={() => toggleMoveTag(tag)}
-                      className={`tag-btn ${moveTags.includes(tag) ? 'active' : ''} ${
-                        blocked ? 'disabled-mutual' : ''
-                      }`}
-                      disabled={blocked}
-                    >
-                      {optionLabel(config, 'move_tags', tag)}
-                    </button>
-                    <InfoTip text={optionDescription(config, 'move_tags', tag)} />
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">Form Quality</label>
-            <div className="quality-buttons">
-              {[1, 2, 3, 4, 5].map((q) => (
-                <button
-                  key={q}
-                  type="button"
-                  onClick={() => setFormQuality(q)}
-                  className={`quality-btn ${formQuality === q ? 'active' : ''}`}
-                  title={FORM_QUALITY_LABELS[q]}
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-            <div className="quality-description">{FORM_QUALITY_LABELS[formQuality]}</div>
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">Effort Level: {effortLevel}/10</label>
-            <input
-              type="range"
-              min="0"
-              max="10"
-              value={effortLevel}
-              onChange={(e) => setEffortLevel(Number(e.target.value))}
-              className="effort-slider"
-            />
-            <div className="effort-labels">
-              <span>Easy</span>
-              <span>Max Effort</span>
-            </div>
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">Description (optional)</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value.slice(0, 500))}
-              placeholder="Add notes about this move…"
-              className="description-textarea"
-              rows="2"
-            />
-          </div>
-        </div>
-
-        {/* ---------- Lens 3: Outcome ---------- */}
-        <div className="lens-section">
-          <h3 className="lens-title">📊 Outcome</h3>
-
-          <div className="form-field">
-            <label className="form-label">Result</label>
-            {radioGroup('results', 'result', result, setResult)}
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">Reach Detail</label>
-            {radioGroup('reach_details', 'reach_detail', reachDetail, setReachDetail)}
-          </div>
-
-          <div className="form-field">
-            <label className="form-label">
-              Confidence
-              <InfoTip text="How confident you are in the labels you just gave — not how confident the climber looked." />
-            </label>
-            {radioGroup('confidence_levels', 'confidence', confidence, setConfidence)}
-          </div>
+        <div className="move-form-footer">
+          <button onClick={handleClose} className="btn-secondary">
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            className="btn-primary"
+            disabled={loading}
+          >
+            {loading ? 'Saving...' : 'Save Move'}
+          </button>
         </div>
       </div>
-
-      <div className="move-form-footer">
-        <button onClick={handleClose} className="btn-secondary">
-          Cancel
-        </button>
-        <button onClick={handleSubmit} className="btn-primary" disabled={loading}>
-          {loading ? 'Saving…' : 'Save Move'}
-        </button>
-      </div>
-    </aside>
+    </div>
   );
+}
+
+// Helper function for formatting labels
+function formatLabel(str) {
+  return str
+    .split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 }
 
 export default MoveForm;

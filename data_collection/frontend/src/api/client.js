@@ -5,7 +5,6 @@
  * Updated for three-lens schema: Environment / Strategy / Outcome
  */
 import axios from 'axios';
-import { authHeader, requireAccessToken, refreshSession } from './auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -16,42 +15,6 @@ const api = axios.create({
   },
 });
 
-// Every /api route except /api/health requires a Supabase bearer token.
-api.interceptors.request.use(async (config) => {
-  if (config.url && config.url.includes('/api/health')) return config;
-  Object.assign(config.headers, await authHeader());
-  return config;
-});
-
-/**
- * Refresh once on 401, then replay the request.
- *
- * Pose extraction can run for minutes before the first API call, which is long
- * enough for an access token to expire mid-session. Rather than dumping the
- * labeler back at the sign-in screen (and losing the extraction), force a
- * refresh and retry exactly once. `_retriedAfterRefresh` guards against a loop
- * when the refresh token is dead too — in that case the 401 propagates and the
- * auth state listener in App will show the sign-in screen.
- */
-api.interceptors.response.use(
-  (response) => response,
-  async (error) => {
-    const original = error.config;
-    const isAuthFailure = error.response?.status === 401;
-
-    if (!isAuthFailure || !original || original._retriedAfterRefresh) {
-      return Promise.reject(error);
-    }
-
-    original._retriedAfterRefresh = true;
-    const token = await refreshSession();
-    if (!token) return Promise.reject(error);
-
-    original.headers = { ...original.headers, Authorization: `Bearer ${token}` };
-    return api(original);
-  }
-);
-
 // ==================== CONFIGURATION ====================
 
 export const getConfig = async () => {
@@ -61,87 +24,16 @@ export const getConfig = async () => {
 
 // ==================== VIDEOS ====================
 
-/**
- * Register a client-processed video.
- *
- * Retried with exponential backoff: extraction can run for minutes before this
- * call, so a transient network blip here would throw away all of that work.
- * Only transport failures and 5xx are retried — a 401 or a 413 will not become
- * true on a second attempt.
- *
- * @param {{filename: string, fps: number, total_frames: number, duration_ms: number, csv_data: string}} payload
- * @param {{attempts?: number, baseDelayMs?: number, onRetry?: (attempt: number, delayMs: number, err: Error) => void, signal?: AbortSignal}} [options]
- */
-export const registerVideo = async (payload, options = {}) => {
-  const { attempts = 3, baseDelayMs = 1000, onRetry, signal } = options;
+export const uploadVideo = async (file) => {
+  const formData = new FormData();
+  formData.append('file', file);
 
-  // Surface a missing session before spending a retry budget on a guaranteed 401.
-  await requireAccessToken();
-
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      const response = await api.post('/api/videos/register', payload, { signal });
-      return response.data;
-    } catch (err) {
-      lastError = err;
-
-      const status = err.response?.status;
-      const retriable = status === undefined || status >= 500;
-      if (!retriable || attempt === attempts || signal?.aborted) break;
-
-      // 1s, 2s, 4s with jitter, so parallel clients don't retry in lockstep.
-      const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random());
-      if (onRetry) onRetry(attempt, delay, err);
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-
-  const detail = lastError?.response?.data?.detail;
-  throw new Error(detail || lastError?.message || 'Failed to register video');
-};
-
-/** Presigned PUT URL for uploading the original video straight to R2. */
-export const getUploadUrl = async (videoId, contentType = 'video/mp4') => {
-  const response = await api.post(`/api/videos/${videoId}/upload-url`, {
-    content_type: contentType,
+  const response = await api.post('/api/videos/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
   });
   return response.data;
-};
-
-/**
- * Upload the original video to R2.
- *
- * The Content-Type must match the one the presigned URL was signed with, or R2
- * rejects the signature. Sent without credentials — the signature is the auth.
- */
-export const putVideoToR2 = async (url, file, contentType = 'video/mp4') => {
-  const response = await fetch(url, {
-    method: 'PUT',
-    body: file,
-    headers: { 'Content-Type': contentType },
-  });
-  if (!response.ok) {
-    throw new Error(`Video upload failed (${response.status})`);
-  }
-  return response;
-};
-
-/** Record the R2 key once the direct upload has finished. */
-export const confirmUpload = async (videoId, key) => {
-  const response = await api.post(`/api/videos/${videoId}/confirm-upload`, { key });
-  return response.data;
-};
-
-/**
- * Full original-video upload: presign → PUT to R2 → confirm.
- * Best-effort by design; the pose CSV is already saved by registerVideo.
- */
-export const uploadOriginalVideo = async (videoId, file) => {
-  const contentType = file.type || 'video/mp4';
-  const { url, key } = await getUploadUrl(videoId, contentType);
-  await putVideoToR2(url, file, contentType);
-  return confirmUpload(videoId, key);
 };
 
 export const getVideos = async () => {
@@ -160,112 +52,34 @@ export const getVideoCSV = async (videoId) => {
 };
 
 /**
- * The pose CSV as text, for a video whose extraction is not in this session's
- * store (a reload, or a video registered on another machine).
- *
- * Two hops by necessity: the API answers `307` to a presigned R2 URL, and that
- * URL rejects an Authorization header — so the token goes on the first request
- * and nothing goes on the second.
- */
-export const getVideoCsvText = async (videoId) => {
-  const headers = await authHeader();
-  const response = await fetch(`${API_BASE_URL}/api/videos/${videoId}/csv`, { headers });
-  if (!response.ok) {
-    throw new Error(`Could not load pose data (${response.status})`);
-  }
-  return response.text();
-};
-
-/**
  * Export labeled data for a video.
- *
- * v3 takes no query params — the video is no longer deleted as a side effect
- * of exporting.
- *
  * @param {number} videoId - The video ID to export
- * @returns {Promise<{video_id: number, r2_export_key: string}>}
+ * @param {boolean} deleteVideo - If true, delete the video file after export
+ * @returns {Promise<{path: string, video_deleted: boolean}>}
  */
-export const exportVideo = async (videoId) => {
-  const response = await api.post(`/api/videos/${videoId}/export`);
+export const exportVideo = async (videoId, deleteVideo = true) => {
+  const response = await api.post(`/api/videos/${videoId}/export?delete_video=${deleteVideo}`);
   return response.data;
 };
 
 /**
- * Presigned URL for the exported CSV.
- *
- * v3 answers `307` to a presigned R2 URL rather than streaming a body. Axios
- * follows redirects transparently in the browser, and the presigned URL rejects
- * the Authorization header we would otherwise attach, so this uses a bare fetch
- * with redirect: 'manual' to read the Location out instead of following it.
- *
- * Falls back to following the redirect and reading `response.url` on browsers
- * where an opaque redirect hides the Location header.
- *
- * @param {number} videoId
- * @returns {Promise<string>} a URL that downloads the CSV
- */
-export const getExportDownloadUrl = async (videoId) => {
-  const headers = await authHeader();
-  const target = `${API_BASE_URL}/api/videos/${videoId}/export/download`;
-
-  const manual = await fetch(target, { method: 'GET', headers, redirect: 'manual' });
-  const location = manual.headers.get('Location');
-  if (location) return location;
-
-  // Opaque redirect: follow it and use where we landed.
-  const followed = await fetch(target, { method: 'GET', headers });
-  if (!followed.ok) {
-    throw new Error(`Could not get the download link (${followed.status})`);
-  }
-  return followed.url;
-};
-
-/**
- * Download the exported CSV file by navigating to its presigned URL.
+ * Download the exported CSV file.
  * @param {number} videoId - The video ID
  */
 export const downloadExport = async (videoId) => {
-  const url = await getExportDownloadUrl(videoId);
-  window.location.assign(url);
-};
+  const response = await api.get(`/api/videos/${videoId}/export/download`, {
+    responseType: 'blob',
+  });
 
-// ==================== HOLDS ====================
-
-/**
- * Every hold marked on a video. `bbox_*` are normalized 0-1, so they must be
- * compared against landmarks only after normalizing those — see
- * services/holdMatching, which is the single source of that geometry.
- */
-export const getHolds = async (videoId) => {
-  const response = await api.get(`/api/videos/${videoId}/holds`);
-  return response.data;
-};
-
-/**
- * Create many holds at once — what the detector posts after the first frame.
- * @param {number} videoId
- * @param {Array<{bbox_x:number,bbox_y:number,bbox_w:number,bbox_h:number,source?:string}>} holds
- */
-export const createHoldsBulk = async (videoId, holds) => {
-  const response = await api.post(`/api/videos/${videoId}/holds`, { holds });
-  return response.data;
-};
-
-/** Create a single hold — what drag-to-add posts. */
-export const createHold = async (videoId, hold) => {
-  const response = await api.post('/api/holds', { video_id: videoId, ...hold });
-  return response.data;
-};
-
-/** Move, resize, or re-source a hold. */
-export const updateHold = async (holdId, fields) => {
-  const response = await api.put(`/api/holds/${holdId}`, fields);
-  return response.data;
-};
-
-/** Delete a hold. */
-export const deleteHold = async (holdId) => {
-  await api.delete(`/api/holds/${holdId}`);
+  // Create download link
+  const url = window.URL.createObjectURL(new Blob([response.data]));
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', `video_${videoId}_labeled.csv`);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
 };
 
 // ==================== MOVES (Lens 2: Strategy) ====================

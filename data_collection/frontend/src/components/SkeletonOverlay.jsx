@@ -4,7 +4,6 @@
  * Draws pose skeleton and angles on top of video using canvas.
  */
 import { useEffect, useRef } from 'react';
-import { LEGACY_LANDMARK_ORDER } from '../services/poseMath';
 
 function SkeletonOverlay({ videoRef, currentFrame, csvData }) {
   const canvasRef = useRef(null);
@@ -111,13 +110,10 @@ function SkeletonOverlay({ videoRef, currentFrame, csvData }) {
       }
     }
 
-    // Draw joint circles. The CSV carries all 33 MediaPipe landmarks, but only
-    // these 15 body joints are drawn: dotting eyes, ears, mouth and fingers
-    // clutters the face without saying anything about the climbing.
+    // Draw joint circles
     ctx.fillStyle = '#FFFF00'; // Yellow
-    for (const name of LEGACY_LANDMARK_ORDER) {
-      const coords = landmarks[name];
-      if (coords && coords.x && coords.y) {
+    for (const [name, coords] of Object.entries(landmarks)) {
+      if (coords.x && coords.y) {
         ctx.beginPath();
         ctx.arc(coords.x, coords.y, 4, 0, 2 * Math.PI);
         ctx.fill();
