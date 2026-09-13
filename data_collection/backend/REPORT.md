@@ -5,6 +5,70 @@ Scope: `data_collection/backend` only. Frontend untouched.
 
 ---
 
+## ✅ Update — Supabase project created, schema live, verified against it
+
+After the initial pass, a dedicated Supabase project was created and linked, which
+cleared the largest blocker. What changed:
+
+- **Project created:** `dynalytix-climbing`, ref `nbqtgknayvsjkevaoeef`, org
+  **Dynalytix** (`huwgfrlivqxluwsjkxln`), region East US (North Virginia).
+  Dashboard: https://supabase.com/dashboard/project/nbqtgknayvsjkevaoeef
+- **CLI linked** to that project. The shared `login_system` project is no longer
+  referenced anywhere.
+- **Migration applied for real** with `supabase db push`. Verified over psql
+  against the live database: 7 tables, RLS enabled on all 7, 4 policies on each
+  data table, `schema_version = 3`.
+- **`.env` rewritten** for the new project: `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY`, and a working `DATABASE_URL`. R2 variables are
+  present but still empty. A backup of the previous `.env` is in the session
+  scratchpad. No secret value appears in this report or in any commit.
+- **Test suite run against the live Supabase database: 61 passed.**
+- **Smoke test run with real ES256 access tokens** for two throwaway users
+  created through the auth admin API, against the live database: **35 passed, 0
+  failed.** R2 was still stubbed locally, as no R2 credentials exist yet.
+- **`.gitignore` fixed:** `.env` was not ignored and now is, along with
+  `supabase/.temp/` (which holds the pooler URL with credentials).
+
+### Three real bugs this surfaced
+
+Running against actual infrastructure rather than a local stand-in caught three
+defects that would each have broken the Railway deployment:
+
+1. **ES256 vs HS256.** Supabase projects created from 2025 on sign user tokens
+   with an asymmetric ES256 key published via JWKS, not the legacy HS256 shared
+   secret. `auth.py` verified HS256 only, so it would have rejected every real
+   token from this new project with a 401. It now reads the token's `alg` header
+   and verifies ES256/RS256 against the project's cached JWKS, falling back to
+   HS256 for legacy projects. `SUPABASE_JWT_SECRET` is now optional.
+2. **Prepared statements vs the transaction pooler.** psycopg3 prepares
+   statements automatically; Supabase's pooler (pgbouncer, port 6543) multiplexes
+   connections per transaction, so this raised `DuplicatePreparedStatement`
+   intermittently — 5 test failures. `Database._configure_connection` now sets
+   `prepare_threshold = None` on every pooled connection.
+3. **Missing crypto extra.** `PyJWT` cannot do ES256 without the `cryptography`
+   package; every authenticated request 500'd with
+   `MissingCryptographyError`. `requirements.txt` now pins `PyJWT[crypto]`.
+
+Also worth knowing: the **direct** database host (`db.<ref>.supabase.co:5432`) is
+IPv6-only and unreachable from this machine. `DATABASE_URL` uses the transaction
+pooler at `aws-0-us-east-1.pooler.supabase.com:6543`. Use the pooler on Railway too.
+
+### Still outstanding
+
+Only R2 and Railway now:
+
+- No R2 account/bucket/credentials — `src/storage/r2.py` is untested against the
+  real service, and the CORS rule in §6 is unapplied.
+- Railway still has no linked project, so no variables are set and nothing is
+  deployed.
+
+Two throwaway auth users (`smoke-test-a@dynalytix.test`,
+`smoke-test-b@dynalytix.test`) now exist in the project so the smoke test can be
+re-run; delete them from Authentication → Users if you would rather not keep them.
+The labeling tables were truncated afterwards, so the database is empty.
+
+---
+
 ## ⚠️ Blockers found at step 0 (read this first)
 
 The brief stated the Supabase and Railway CLIs were already linked and that all
@@ -12,12 +76,12 @@ secrets were in `.env`. None of that held. Verified:
 
 | Check | Command | Result |
 |---|---|---|
-| Supabase CLI linked | `supabase projects list` | **Not linked** — "Cannot find project ref. Have you run supabase link?" |
-| Dedicated Supabase project | `supabase projects list` | **Does not exist.** Org has: login_system, login_system_STEAP, divvy, freelance-agent, Neuroplica, Aami, steap-staging, steap-sandbox. No dynalytix/climbing project. |
+| Supabase CLI linked | `supabase projects list` | **Not linked** — "Cannot find project ref." *(Resolved — see the update above.)* |
+| Dedicated Supabase project | `supabase projects list` | **Did not exist.** *(Resolved — `dynalytix-climbing` created.)* Org has: login_system, login_system_STEAP, divvy, freelance-agent, Neuroplica, Aami, steap-staging, steap-sandbox. No dynalytix/climbing project. |
 | Backend's `SUPABASE_URL` target | ref matched against project list | Points at the **`login_system`** project — a shared auth project (created 2026-03-16), not a project dedicated to this app. |
 | Railway CLI linked | `railway status` | **Not linked** — "No linked project found. Run railway link to connect to a project." |
 | `wrangler` installed | `which wrangler` | **Not installed.** |
-| `DATABASE_URL` | `.env` | **Absent.** |
+| `DATABASE_URL` | `.env` | **Was absent.** *(Resolved — now set to the transaction pooler.)* |
 | R2 credentials (`R2_ACCOUNT_ID`, access key, secret, bucket) | `.env` | **All absent.** |
 | `GITHUB_TOKEN` / `DATA_REPO` | `.env` | Absent locally (they are read from the environment at runtime, so they exist only as Railway service variables). |
 
@@ -460,14 +524,14 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 
 | Step | Status | Why |
 |---|---|---|
-| 3 — `supabase db push` | **Not done** | CLI not linked; the only configured project is the shared `login_system`, and the migration drops tables. Verified against local Postgres 16 instead. |
-| 3 — verify tables via psql against `DATABASE_URL` | **Substituted** | No `DATABASE_URL` exists. Verified against the local scratch database: 7 tables, RLS on all, 4 policies each, `schema_version = 3`. |
+| 3 — `supabase db push` | **DONE** | Applied to the new dedicated project `dynalytix-climbing`. |
+| 3 — verify tables via psql against `DATABASE_URL` | **DONE** | Against the live database: 7 tables, RLS on all, 4 policies each, `schema_version = 3`. |
 | 4 — R2 bucket + CORS | **Not done** | `wrangler` not installed, no R2 credentials. CORS JSON provided in §6. |
 | 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
-| 7 — tests against the real `DATABASE_URL` | **Substituted** | Ran against local Postgres 16 with the same migration. 61 passed. |
+| 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
 | 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
 | 8 — `railway variables --set`, `railway up`, health check on the deployment | **Not done** | No linked project, and no values exist for `DATABASE_URL` or any `R2_*` variable. Seven projects with generated names are visible; guessing which hosts this backend and deploying a breaking API change to it was not a safe autonomous call. |
-| 9 — smoke test against the deployed URL | **Substituted** | No deployment URL. Ran against the real app locally: 35 passed, 0 failed. |
+| 9 — smoke test against the deployed URL | **Partly done** | No deployment URL yet. Ran against the real app locally, using real ES256 tokens and the live Supabase database: 35 passed, 0 failed. R2 stubbed. |
 
 Nothing about the application code is unverified — every module is exercised by
 the 61-test suite and the 35-check smoke run. What is unverified is the
@@ -479,25 +543,21 @@ the 61-test suite and the 35-check smoke run. What is unverified is the
 
 In order:
 
-1. **Decide the Supabase project.** `SUPABASE_URL` currently points at `login_system`, shared with other apps. Either create a dedicated project (recommended) or confirm this one is exclusively this app's. Then:
-   ```bash
-   cd data_collection/backend
-   supabase link --project-ref <ref>
-   supabase db push          # reread the warning at the top of the migration
-   ```
-2. **Add `DATABASE_URL` to `.env`** — Supabase → Project Settings → Database → Connection string. Use the pooler (port 6543) for Railway.
+~~1. Decide the Supabase project.~~ **Done** — `dynalytix-climbing` created, linked, migration applied and verified.
+
+~~2. Add `DATABASE_URL` to `.env`.~~ **Done** — points at the transaction pooler.
+
 3. **Create the R2 bucket and API token**, add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` to `.env`, and apply the CORS rule from §6.
-4. **Run the suite for real:**
-   ```bash
-   export TEST_DATABASE_URL=<a throwaway database, NOT production>
-   pytest tests/ -q
-   ```
+4. ~~Run the suite for real.~~ **Done** — 61 passed against the live database.
+   Note for future runs: the suite re-applies the migration, which **drops and
+   recreates** the labeling tables. That was safe on an empty project. Once real
+   labels exist, point `TEST_DATABASE_URL` at a separate throwaway database.
 5. **Link Railway and set the variables** (values from `.env`, never echoed):
    ```bash
    railway link                       # pick the project hosting this backend
    railway variables --set DATABASE_URL="..." \
-                     --set SUPABASE_JWT_SECRET="..." \
                      --set SUPABASE_URL="..." \
+                     --set SUPABASE_ANON_KEY="..." \
                      --set SUPABASE_SERVICE_ROLE_KEY="..." \
                      --set R2_ACCOUNT_ID="..." \
                      --set R2_ACCESS_KEY_ID="..." \

@@ -68,8 +68,22 @@ class Database:
             min_size=min_size,
             max_size=max_size,
             kwargs={'row_factory': dict_row},
+            configure=self._configure_connection,
             open=True,
         )
+
+    @staticmethod
+    def _configure_connection(conn):
+        """Prepare each pooled connection.
+
+        Supabase's transaction pooler (pgbouncer, port 6543) multiplexes
+        connections per transaction, so a prepared statement created on one
+        backend is not there on the next - psycopg3's automatic prepared
+        statements raise DuplicatePreparedStatement against it. Disabling the
+        threshold keeps every statement unprepared, which is what the pooler
+        requires. Harmless on a direct connection.
+        """
+        conn.prepare_threshold = None
 
     def close(self):
         """Close the pool. Call on application shutdown."""

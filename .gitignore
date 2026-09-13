@@ -6,3 +6,12 @@ __pycache__/
 *.pyc
 *.db
 *.db.backup
+
+# Secrets - never commit
+.env
+.env.local
+*.env
+!.env.example
+
+# Supabase CLI local state (contains the pooler URL with credentials)
+**/supabase/.temp/

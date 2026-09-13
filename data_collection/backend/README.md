@@ -36,8 +36,8 @@ tests/                  # pytest suite
 ## Setup
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env      # then fill it in
+pip install -r requirements.txt   # PyJWT[crypto] is required for ES256
+cp .env.example .env              # then fill it in
 
 # Apply the schema (see the warning below first)
 supabase link --project-ref <ref>
@@ -58,8 +58,17 @@ Every route under `/api` except `/api/health` requires a Supabase access token:
 Authorization: Bearer <supabase access token>
 ```
 
-The token is verified against `SUPABASE_JWT_SECRET` (HS256, `aud=authenticated`)
-and its `sub` claim becomes the `user_id` that scopes every query.
+The token's `sub` claim becomes the `user_id` that scopes every query.
+
+Verification follows the token's own `alg` header, so both Supabase signing
+schemes work:
+
+- **ES256 / RS256** (the default for projects created from 2025 on) — the public
+  key is fetched from `{SUPABASE_URL}/auth/v1/.well-known/jwks.json` and cached.
+  Needs `SUPABASE_URL`; no shared secret.
+- **HS256** (legacy projects) — verified against `SUPABASE_JWT_SECRET`.
+
+`aud` must be `authenticated`, and `exp` and `sub` are required.
 
 ## API Documentation
 
@@ -168,6 +177,11 @@ exports/{user_id}/{video_id}_labeled.csv
 Postgres (Supabase), schema version 3. RLS is enabled on every table with
 select/insert/update/delete policies scoped to `auth.uid() = user_id`.
 
+Connect through the **transaction pooler** (port 6543). The direct database
+host is IPv6-only. psycopg's automatic prepared statements are disabled in
+`Database._configure_connection` because pgbouncer in transaction mode cannot
+carry a prepared statement between pooled backends.
+
 ```sql
 videos:       id, user_id, filename, fps, total_frames, duration_ms,
               r2_video_key, r2_pose_csv_key, r2_export_key, uploaded_at
@@ -231,8 +245,13 @@ python scripts/smoke_test.py --url https://<service>.up.railway.app
 
 Registers a video with a synthetic pose CSV, labels it across all three lenses,
 exports, fetches the export back out of R2, then checks a second user gets 404
-on every one of those resources. Tokens are minted from `SUPABASE_JWT_SECRET`
-unless `--jwt` / `--other-jwt` are supplied.
+on every one of those resources.
+
+Tokens: with `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and
+`SUPABASE_ANON_KEY` set, it creates two throwaway users through the auth admin
+API and signs them in, so the project's real signing keys are exercised. Pass
+`--jwt` / `--other-jwt` to supply your own. It falls back to locally minted
+HS256 tokens only on legacy-secret projects.
 
 ## Error handling
 

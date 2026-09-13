@@ -11,8 +11,13 @@ Usage:
     python scripts/smoke_test.py --url https://<service>.up.railway.app \
         [--jwt <token>] [--other-jwt <token>]
 
-With no --jwt, a token is minted locally for a fixed throwaway uuid using
-SUPABASE_JWT_SECRET, which must then match the deployed service's secret.
+With no --jwt, two throwaway users are created through the Supabase auth admin
+API (needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY) and real access tokens
+are fetched for them. That exercises the project's actual signing keys.
+
+If the admin API is unreachable, it falls back to minting HS256 tokens from
+SUPABASE_JWT_SECRET for two fixed uuids - only usable on projects that still
+have the legacy JWT secret enabled.
 
 Exit code is 0 only when every check passes.
 """
@@ -54,8 +59,65 @@ def check(label: str, condition: bool, detail: str = ''):
         print(f'  FAIL  {label}' + (f' - {detail}' if detail else ''))
 
 
+def supabase_token(email: str, password: str) -> str:
+    """Create a throwaway user via the admin API and return a real access token.
+
+    Raises RuntimeError when the project or service role key is unavailable, so
+    the caller can fall back to local minting.
+    """
+    base = os.environ.get('SUPABASE_URL')
+    service_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    anon_key = os.environ.get('SUPABASE_ANON_KEY')
+    if not (base and service_key and anon_key):
+        raise RuntimeError('SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and '
+                           'SUPABASE_ANON_KEY are needed to use real auth')
+
+    base = base.rstrip('/')
+
+    # Create the user; an existing one (422) is fine, we just sign in.
+    req = urllib.request.Request(
+        f'{base}/auth/v1/admin/users',
+        data=json.dumps({
+            'email': email,
+            'password': password,
+            'email_confirm': True,
+        }).encode(),
+        headers={
+            'Content-Type': 'application/json',
+            'apikey': service_key,
+            'Authorization': f'Bearer {service_key}',
+        },
+        method='POST',
+    )
+    try:
+        urllib.request.urlopen(req, timeout=30).read()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (409, 422):
+            raise RuntimeError(f'admin user create failed: {exc.code} {exc.read().decode()[:200]}')
+
+    # Sign in for an access token signed with the project's real key.
+    req = urllib.request.Request(
+        f'{base}/auth/v1/token?grant_type=password',
+        data=json.dumps({'email': email, 'password': password}).encode(),
+        headers={
+            'Content-Type': 'application/json',
+            'apikey': anon_key,
+        },
+        method='POST',
+    )
+    try:
+        body = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f'sign-in failed: {exc.code} {exc.read().decode()[:200]}')
+
+    token = body.get('access_token')
+    if not token:
+        raise RuntimeError(f'no access_token in response: {body}')
+    return token
+
+
 def mint_jwt(user_id: str) -> str:
-    """Sign a Supabase-shaped token for a throwaway user."""
+    """Sign a Supabase-shaped token locally (legacy HS256 projects only)."""
     try:
         import jwt
     except ImportError:
@@ -124,10 +186,24 @@ def main():
     args = parser.parse_args()
 
     base = args.url.rstrip('/')
-    token = args.jwt or mint_jwt(TEST_USER_ID)
-    other_token = args.other_jwt or mint_jwt(OTHER_USER_ID)
 
-    print(f'Smoke test against {base}\n')
+    if args.jwt and args.other_jwt:
+        token, other_token = args.jwt, args.other_jwt
+        print('Using the supplied tokens')
+    else:
+        try:
+            token = args.jwt or supabase_token(
+                'smoke-test-a@dynalytix.test', 'smoke-test-password-a-123')
+            other_token = args.other_jwt or supabase_token(
+                'smoke-test-b@dynalytix.test', 'smoke-test-password-b-123')
+            print('Using real Supabase access tokens for two throwaway users')
+        except RuntimeError as exc:
+            print(f'Real auth unavailable ({exc});\n'
+                  f'falling back to locally minted HS256 tokens')
+            token = args.jwt or mint_jwt(TEST_USER_ID)
+            other_token = args.other_jwt or mint_jwt(OTHER_USER_ID)
+
+    print(f'\nSmoke test against {base}\n')
 
     # --- health -------------------------------------------------------------
     print('health')
