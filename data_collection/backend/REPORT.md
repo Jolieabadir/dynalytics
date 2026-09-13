@@ -625,11 +625,14 @@ left_shoulder,left,smoke test tag
 
 ---
 
-## 6. R2 bucket and CORS — for you to apply
+## 6. R2 bucket and CORS — applied
 
-`wrangler` is not installed and no R2 credentials exist, so neither the bucket nor the CORS rule could be created. Two options:
+Done; kept for reference and for rebuilding the bucket elsewhere. The bucket
+`dynalytix-climbing` and its CORS rule are live (see the fifth update).
+`wrangler` was never needed: R2 implements the S3 API, and the dashboard handles
+CORS.
 
-**With wrangler:**
+**To recreate with wrangler:**
 ```bash
 npm install -g wrangler
 wrangler login
@@ -637,7 +640,7 @@ wrangler r2 bucket create <bucket-name>
 wrangler r2 bucket cors put <bucket-name> --file r2-cors.json
 ```
 
-**Or paste this in the Cloudflare dashboard** (R2 → your bucket → Settings → CORS Policy). This is `r2-cors.json`:
+**Or paste this in the Cloudflare dashboard** (R2 → your bucket → Settings → CORS Policy). This is `r2-cors.json`, and it is what is currently applied:
 
 ```json
 [
@@ -817,17 +820,18 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 |---|---|---|
 | 3 — `supabase db push` | **DONE** | Applied to the new dedicated project `dynalytix-climbing`. |
 | 3 — verify tables via psql against `DATABASE_URL` | **DONE** | Against the live database: 7 tables, RLS on all, 4 policies each, `schema_version = 3`. |
-| 4 — R2 bucket + CORS | **DONE** | Bucket and object-scoped token created; 10/10 object checks pass, presigned PUT/GET confirmed with curl; CORS applied and read back in the dashboard. |
-| 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
+| 4 — R2 bucket + CORS | **DONE** | Bucket and object-scoped token created; 10/10 object checks pass; presigned PUT/GET confirmed with curl; CORS applied, confirmed in the dashboard and by a live preflight. |
+| 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Deferred on purpose** | Left set so the deployed old build's GitHub sync keeps working until cutover. Removing them is the first step after the merge (section 9). |
 | 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
-| 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
+| 7 — R2 tests against the real bucket | **DONE** | `verify_r2.py` runs against the real bucket: 10 passed, 0 failed. The pytest fixture still uses the in-memory fake unless the bucket answers. |
 | 8 — `railway variables --set` | **DONE** | All 8 v3 variables set on `adorable-integrity`, verified by length, no values printed. |
 | 8 — `railway up` + health check on the deployment | **Held by choice** | Not blocked — staged and ready. Held because deploying breaks `collect.dynalytix.net` until the frontend ships the §7 changes. |
 | 9 — smoke test against the deployed URL | **Pending the deploy** | Already passes 35/35 against the real app locally with real ES256 tokens and the live Supabase database. Re-run against the deployed URL at cutover, when R2 will be real rather than stubbed. |
 
 Nothing about the application code is unverified — every module is exercised by
-the 61-test suite and the 35-check smoke run. What is unverified is the
-*infrastructure wiring*: real Supabase, real R2, real Railway.
+the 61-test suite, the 35-check smoke run and the 10-check R2 run. Supabase and
+R2 are verified against the real services. The only untested path is the
+deployed container itself, which is held deliberately, not blocked.
 
 ---
 
