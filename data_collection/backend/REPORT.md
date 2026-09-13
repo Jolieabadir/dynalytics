@@ -77,7 +77,7 @@ A follow-up pass was requested on the premise that R2 credentials were in
 | Check | Command | Result |
 |---|---|---|
 | R2 credentials | read `.env` | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` are all present as keys but set to **empty strings**. The file has not been modified since it was written. |
-| Railway linked | `railway status` | **"No linked project found."** The CLI's stored link state covers only `/Users/jolie/Downloads/Steap`, `.../Steap-semester` and a Steap scratchpad — nothing under Dynalytics. |
+| Railway linked | `railway status` | **Was not linked.** *(Resolved — now linked to `steadfast-vitality` / `adorable-integrity` / `production`; see §9 step 5 for how the service was identified.)* |
 | `wrangler` | `which wrangler` | **Still not installed.** |
 
 No other file on disk holds R2 credentials (searched every `.env*` in the repo).
@@ -568,7 +568,7 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 | 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
 | 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
 | 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
-| 8 — `railway variables --set`, `railway up`, health check | **Still blocked** | `railway status`: "No linked project found". `DATABASE_URL` is now available, but the R2 values are not, and the project to link is still unknown. Deploying a breaking API change to a guessed project was not a safe autonomous call. |
+| 8 — `railway variables --set`, `railway up`, health check | **Still blocked** | Now linked to the correct service (`adorable-integrity`). Blocked on the empty `R2_*` values — deploying without them would replace a working production backend with one that 503s on every upload and export. |
 | 9 — smoke test against the deployed URL | **Partly done** | No deployment URL yet. Ran against the real app locally, using real ES256 tokens and the live Supabase database: 35 passed, 0 failed. R2 stubbed. |
 
 Nothing about the application code is unverified — every module is exercised by
@@ -604,16 +604,35 @@ In order:
    Note for future runs: the suite re-applies the migration, which **drops and
    recreates** the labeling tables. That was safe on an empty project. Once real
    labels exist, point `TEST_DATABASE_URL` at a separate throwaway database.
-5. **Railway — still blocked, not linked.** `railway status` reports "No linked
-   project found"; the CLI's link state on this machine covers only three
-   *Steap* directories. You are authenticated, and seven projects are visible,
-   but their names are auto-generated and none identifies this backend. Picking
-   one and deploying a breaking API change to it was not a safe guess to make
-   unattended, so link it yourself first:
+5. **Railway — now linked.** The target was identified by inspecting every
+   project and service rather than guessing:
+
+   | Service (project `steadfast-vitality`) | App vars | Domain | What it is |
+   |---|---|---|---|
+   | **`adorable-integrity`** | `GITHUB_TOKEN`, `DATA_REPO` | `adorable-integrity-production.up.railway.app` | **This backend.** `GET /` returns "Dynalytix Climbing API is running". |
+   | `Data_collection_climbing` | `VITE_API_URL` | `collect.dynalytix.net` | The climbing **frontend** (Vite). |
+   | `Movement_analysis` | `VITE_API_URL` | `analysis.dynalytix.net` | The FMS **frontend**. |
+   | `dynalytix` | `PORT`, `PYTHON_VERSION` | `dynalytix-production.up.railway.app` | The FMS backend. |
+
+   The service name gives nothing away; `GITHUB_TOKEN` + `DATA_REPO` (set by the
+   retired `data_sync.py`) identify it, and the live response confirms it. Note
+   the deploy target is **not** the service called `Data_collection_climbing` —
+   that is the UI.
+
+   The CLI is linked to `steadfast-vitality` / `adorable-integrity` / `production`.
+
+   > **⚠️ Deploying this branch will break the live site.** That service is up and
+   > serving `collect.dynalytix.net` right now, on the old build: `/api/config`
+   > still returns the pre-v3 taxonomy and `/api/health` 404s. The moment v3
+   > deploys, every request needs a bearer token and the request/response shapes
+   > change, so the current frontend stops working until Terminal C ships the
+   > changes in §7. Coordinate the two deploys, or deploy to a staging service
+   > first.
+
+   Then set the variables:
    ```bash
    cd data_collection/backend
-   railway link                       # pick the project hosting this backend
-   railway status                     # confirm
+   railway status                     # confirm the service before proceeding
    railway variables --set DATABASE_URL="..." \
                      --set SUPABASE_URL="..." \
                      --set SUPABASE_ANON_KEY="..." \
