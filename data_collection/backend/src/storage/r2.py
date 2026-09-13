@@ -37,17 +37,15 @@ def _env(name: str) -> Optional[str]:
     return value.strip() if value else None
 
 
+def _required_vars() -> tuple:
+    """Variables that must be set, given how the endpoint is being resolved."""
+    base = ('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET')
+    return base if _env('R2_ENDPOINT_URL') else ('R2_ACCOUNT_ID',) + base
+
+
 def is_configured() -> bool:
     """True when every R2 variable needed to build a client is present."""
-    return all(
-        _env(name)
-        for name in (
-            'R2_ACCOUNT_ID',
-            'R2_ACCESS_KEY_ID',
-            'R2_SECRET_ACCESS_KEY',
-            'R2_BUCKET',
-        )
-    )
+    return all(_env(name) for name in _required_vars())
 
 
 def bucket_name() -> str:
@@ -59,7 +57,15 @@ def bucket_name() -> str:
 
 
 def endpoint_url() -> str:
-    """The account-level S3 endpoint for this R2 account."""
+    """The account-level S3 endpoint for this R2 account.
+
+    R2_ENDPOINT_URL overrides it, which is how a local MinIO or S3 stub is
+    pointed at during development. Leave it unset in production.
+    """
+    override = _env('R2_ENDPOINT_URL')
+    if override:
+        return override
+
     account_id = _env('R2_ACCOUNT_ID')
     if not account_id:
         raise R2NotConfigured('R2_ACCOUNT_ID is not set')
@@ -81,16 +87,7 @@ def get_client():
             return _client
 
         if not is_configured():
-            missing = [
-                name
-                for name in (
-                    'R2_ACCOUNT_ID',
-                    'R2_ACCESS_KEY_ID',
-                    'R2_SECRET_ACCESS_KEY',
-                    'R2_BUCKET',
-                )
-                if not _env(name)
-            ]
+            missing = [name for name in _required_vars() if not _env(name)]
             raise R2NotConfigured(f'Missing R2 environment variables: {", ".join(missing)}')
 
         _client = boto3.client(
