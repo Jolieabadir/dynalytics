@@ -161,6 +161,62 @@ branch breaks the current frontend until Terminal C ships the §7 changes.
 
 ---
 
+## ✅ Fourth update — Railway variables set, deploy deliberately held
+
+All eight v3 environment variables are now set on the Railway service
+`steadfast-vitality` / `adorable-integrity` / `production`:
+
+| Variable | Set |
+|---|---|
+| `DATABASE_URL` | ✅ 133 chars |
+| `SUPABASE_URL` | ✅ 40 chars |
+| `SUPABASE_ANON_KEY` | ✅ 208 chars |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ 219 chars |
+| `R2_ACCOUNT_ID` | ✅ 32 chars |
+| `R2_ACCESS_KEY_ID` | ✅ 32 chars |
+| `R2_SECRET_ACCESS_KEY` | ✅ 64 chars |
+| `R2_BUCKET` | ✅ 18 chars |
+
+Lengths were checked against `.env` to confirm each landed intact. No value was
+printed at any point: each was piped through
+`railway variables --set-from-stdin <KEY>`, which keeps it off the command line
+entirely, and read back only as a name and a length.
+
+`SUPABASE_JWT_SECRET` is intentionally **not** set — this Supabase project signs
+with ES256 and the public key is discovered from `SUPABASE_URL`.
+
+**Nothing was deployed.** `--skip-deploys` was used on every write, so Railway
+did not roll the service. Confirmed afterwards: the running deployment is still
+the one from 2026-07-25 (~49 days old), `/` still answers from the old build and
+`/api/health` still returns 404. `collect.dynalytix.net` is unaffected.
+
+**`GITHUB_TOKEN` and `DATA_REPO` were left in place**, contrary to step 3, and
+deliberately so: the deployed build still runs `data_sync.py`, and removing them
+now would silently stop export CSVs reaching the `dynalytix-data` repo while the
+old backend is still the one in service. They should be unset as part of the
+cutover, in the same window as `railway up`.
+
+### Remaining: the deploy itself
+
+Everything is staged. The cutover is:
+
+```bash
+cd data_collection/backend
+railway variables delete GITHUB_TOKEN --service adorable-integrity --environment production
+railway variables delete DATA_REPO   --service adorable-integrity --environment production
+railway up --service adorable-integrity
+# then
+curl https://adorable-integrity-production.up.railway.app/api/health
+python scripts/smoke_test.py --url https://adorable-integrity-production.up.railway.app
+```
+
+This is gated on the frontend, not on the backend: the moment v3 is live, every
+endpoint requires a bearer token and the request/response shapes in §7 change,
+so `collect.dynalytix.net` stops working until Terminal C ships. Deploy the two
+together, or stand up a staging service first.
+
+---
+
 ## ⛔ Second update — R2 and Railway are still not available
 
 A follow-up pass was requested on the premise that R2 credentials were in
@@ -660,8 +716,9 @@ Added keys: `hold_slots` (`["start_left","start_right","end","foot"]`), `hold_so
 | 5 — `railway variables --unset GITHUB_TOKEN DATA_REPO` | **Not done** | No linked Railway project. Code and docs references removed; the service variables remain set until you unset them. |
 | 7 — tests against the real `DATABASE_URL` | **DONE** | 61 passed against the live Supabase database. |
 | 7 — R2 tests against the real bucket | **Substituted** | No credentials. In-memory fake used; the fixture automatically prefers the real bucket when credentials work. |
-| 8 — `railway variables --set`, `railway up`, health check | **Still blocked** | Now linked to the correct service (`adorable-integrity`). Blocked on the empty `R2_*` values — deploying without them would replace a working production backend with one that 503s on every upload and export. |
-| 9 — smoke test against the deployed URL | **Partly done** | No deployment URL yet. Ran against the real app locally, using real ES256 tokens and the live Supabase database: 35 passed, 0 failed. R2 stubbed. |
+| 8 — `railway variables --set` | **DONE** | All 8 v3 variables set on `adorable-integrity`, verified by length, no values printed. |
+| 8 — `railway up` + health check on the deployment | **Held by choice** | Not blocked — staged and ready. Held because deploying breaks `collect.dynalytix.net` until the frontend ships the §7 changes. |
+| 9 — smoke test against the deployed URL | **Pending the deploy** | Already passes 35/35 against the real app locally with real ES256 tokens and the live Supabase database. Re-run against the deployed URL at cutover, when R2 will be real rather than stubbed. |
 
 Nothing about the application code is unverified — every module is exercised by
 the 61-test suite and the 35-check smoke run. What is unverified is the
@@ -692,8 +749,8 @@ In order:
    Note for future runs: the suite re-applies the migration, which **drops and
    recreates** the labeling tables. That was safe on an empty project. Once real
    labels exist, point `TEST_DATABASE_URL` at a separate throwaway database.
-5. **Railway — now linked.** The target was identified by inspecting every
-   project and service rather than guessing:
+5. **Railway — linked, variables set, deploy held.** The target was identified
+   by inspecting every project and service rather than guessing:
 
    | Service (project `steadfast-vitality`) | App vars | Domain | What it is |
    |---|---|---|---|
