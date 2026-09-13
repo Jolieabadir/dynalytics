@@ -1,3 +1,65 @@
+# Round C — Labeling UX, Definitions, and Holds
+
+Branch `feat/ux-round-holds`, cut from `feat/pose-extractor-v2` (which itself sits on
+the Supabase/R2 backend work). Sections below are appended as each step lands; the
+Pose Extractor v2 report follows unchanged from §"Pose Extractor v2" onward.
+
+---
+
+## C0. The current UX flow, as found
+
+Read from `App.jsx`, `store/useStore.js`, `api/client.js`, `api/auth.js`,
+`components/{VideoUpload,VideoPlayer,MoveForm,MovesList,TaggingMode}.jsx`.
+
+### The path a labeler walks today
+
+1. **App boot.** `App.jsx` calls `getConfig()` once on mount. Until it resolves the
+   whole app renders `<h2>Loading Dynalytix...</h2>`.
+2. **No sign-in exists.** `api/auth.js` is a token *reader* only — `getSupabase()`,
+   `getAccessToken()`, `requireAccessToken()`. There is no UI anywhere that calls
+   `signInWithPassword`, so in practice there is never a session.
+3. **Upload.** `currentVideo === null` → `VideoUpload`. Picking a file runs MediaPipe
+   pose extraction in the browser (play-through capture loop), then
+   `registerVideo()` (JSON) → `uploadOriginalVideo()` (presign → `PUT` to R2 →
+   confirm). The CSV string and parsed rows land in the store.
+4. **Define mode.** `VideoPlayer` and `MovesList` sit side by side. The player shows
+   the video with a `SkeletonOverlay` drawn from the CSV, transport buttons, a
+   timeline slider, and `[` / `]` to mark start and end frames. With both marked, a
+   **Create Move** button appears and sets `showMoveForm`.
+5. **Labeling.** `MoveForm` renders as a **full-screen modal overlay**
+   (`.move-form-overlay` / `.move-form-modal`) covering the player. Three lens
+   sections — Environment, Strategy, Outcome — then Save, which POSTs move →
+   environment → outcome, with a rollback `deleteMove` if a later call fails.
+6. **Tagging mode.** Choosing a move from `MovesList` switches `mode` to `tagging`.
+   `TaggingMode` replays only that move's frame range, looping at the end, and adds
+   sensation tags at the current frame.
+7. **Finish.** `DoneButton` → `exportVideo()` → `ThankYouModal`.
+
+### What is wrong with it — the motivation for this round
+
+| # | Problem | Addressed by |
+|---|---|---|
+| 1 | **No way to sign in.** `/api/config` now requires a bearer token, so a fresh user 401s and sits on "Loading Dynalytix..." forever with no error and no route forward. | C1 |
+| 2 | **No definitions.** Every option renders through `formatLabel()` — `horizontal_edge` → "Horizontal Edge" — and nothing says what any of them *mean*. Only four `move_tags` have a `title` tooltip, hardcoded in JSX rather than served by config. | C2 |
+| 3 | **No onboarding.** Nothing tells a first-time labeler that `[` and `]` set the move boundaries, or that tagging mode wants the scrub bar. The shortcuts are discoverable only by reading the source. | C3 |
+| 4 | **The form hides the video.** `MoveForm` is a modal overlay, so the labeler cannot see the movement, the skeleton, or scrub while deciding what to call it — exactly when they most need to look. | C4 |
+| 5 | **No sense of progress.** Nothing shows how many moves are defined, labeled, or tagged, and "Done" is a single button with no indication of what remains. | C5 |
+| 6 | **Two-hold model, stale schema.** The form still asks for `hold_type_reaching` / `hold_type_non_reaching` and posts `timing`, `dyno_style`, `tags`, `foot_cut` — all **removed** in schema v3. `previousEnvironment` in the store carries the same dead shape. The backend now wants four named slots. | C6 |
+| 7 | **Holds are invisible.** The backend has had `holds` since v3 and the frontend has never touched them: no overlay, no picking, no detection. Nothing connects a label to a place on the wall. | C7 |
+| 8 | **Reach wording is baked into the enum.** `reached_not_controlled` renders straight through `formatLabel()`, so changing the wording means changing the stored value. | C8 |
+| 9 | **`TaggingMode` reads removed config keys.** It requires `traction_sources` in `REQUIRED_CONFIG_KEYS` and posts `traction_source` / `traction_direction`, all dropped in v3 — it will fail its own config validation against the live backend. | C6 |
+| 10 | **Stale export/download client.** `exportVideo()` still sends `?delete_video=`, and `downloadExport()` expects a streamed blob where the backend now answers `307` to a presigned URL. `VideoPlayer`'s CSV fallback `fetch` sends no auth header at all. | C1, C5 |
+
+### Store shape, as found
+
+`useStore.js` holds: video (`currentVideo`, `videos`, `videoBlobUrl`, `csvData`,
+`csvString`), moves (`moves`, `currentMove`), `frameTags`, player
+(`currentFrame`, `isPlaying`), selection (`moveStart`, `moveEnd`), UI (`mode`,
+`showMoveForm`, `showTagPopup`, `tagPopupType`), `config`, and
+`previousEnvironment` — still the old two-hold shape.
+
+---
+
 # Pose Extractor v2 — Frontend Report
 
 Branch: `feat/pose-extractor-v2`, cut from `feat/supabase-r2-schema-v3` (commit `aea9920`).
