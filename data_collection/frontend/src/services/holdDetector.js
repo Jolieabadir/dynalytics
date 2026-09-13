@@ -37,9 +37,18 @@
  * ---------------------------------------------------------------------------
  */
 
-/** Feature flag. Off unless the build explicitly turns it on. */
+/**
+ * Feature flag. Off unless the build explicitly turns it on.
+ *
+ * Written as a direct comparison against the literal Vite substitutes at build
+ * time, so that when the flag is off Rollup can fold this to `false`, see the
+ * `import('onnxruntime-web')` calls below as unreachable, and drop the runtime
+ * — roughly 28 MB of wasm — out of the bundle entirely. A cleverer expression
+ * here (String(...).toLowerCase()) defeats that folding and ships the whole
+ * runtime to every labeler for a feature that is switched off.
+ */
 export const HOLD_DETECTION_ENABLED =
-  String(import.meta.env.VITE_ENABLE_HOLD_DETECTION).toLowerCase() === 'true';
+  import.meta.env.VITE_ENABLE_HOLD_DETECTION === 'true';
 
 /** Where the weights live, if any. */
 export const HOLD_MODEL_URL =
@@ -157,6 +166,7 @@ let sessionPromise = null;
 /** Load the ONNX session once. onnxruntime-web is imported lazily so it stays
  *  out of the main bundle while detection is off. */
 async function getSession() {
+  if (!HOLD_DETECTION_ENABLED) throw new Error('Hold detection is disabled');
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
     const ort = await import('onnxruntime-web');
