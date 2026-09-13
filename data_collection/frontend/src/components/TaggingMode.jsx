@@ -2,7 +2,8 @@
  * TaggingMode component.
  *
  * Frame tagging interface for adding sensation tags within a move.
- * All taxonomy (tag types, body parts, sides, traction sources) comes from /api/config.
+ * All taxonomy (tag types, body parts, sides) comes from /api/config.
+ * Every tag type carries its plain-language definition behind an "i".
  * Supports multiple tags on the same frame.
  */
 import { useRef, useEffect, useState } from 'react';
@@ -12,11 +13,13 @@ import {
   getFrameTags,
   createFrameTag,
   deleteFrameTag,
-  getConfig,
 } from '../api/client';
 import { exportVideo } from '../api/ExportService';
 import ThankYouModal from './ThankYouModal';
 import DoneButton from './DoneButton';
+import InfoTip from './InfoTip';
+import OnboardingBanner, { BANNER_TAGGING } from './OnboardingBanner';
+import { optionDescription } from '../utils/taxonomy';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -50,7 +53,6 @@ const REQUIRED_CONFIG_KEYS = [
   'tag_types',
   'body_parts',
   'sides',
-  'traction_sources',
 ];
 
 // Validate config has all required keys
@@ -83,6 +85,7 @@ function TaggingMode() {
     removeFrameTag,
     setMode,
     setCurrentMove,
+    config: storeConfig,
   } = useStore();
 
   const [config, setConfigState] = useState(null);
@@ -91,8 +94,6 @@ function TaggingMode() {
   const [selectedLocations, setSelectedLocations] = useState([]);
   const [intensity, setIntensity] = useState(5);
   const [side, setSide] = useState('');
-  const [tractionSource, setTractionSource] = useState('');
-  const [tractionDirection, setTractionDirection] = useState('');
   const [note, setNote] = useState('');
   const [showTagForm, setShowTagForm] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -103,24 +104,19 @@ function TaggingMode() {
 
   const fps = fpsOf(currentVideo);
 
-  // Load config
+  // Config comes from the store — App loads it once, after sign-in. Fetching it
+  // again here would duplicate the request and could disagree with what the
+  // MoveForm rendered against.
   useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        const configData = await getConfig();
-        const validation = validateConfig(configData);
-        if (!validation.valid) {
-          setConfigError(`Missing required config keys: ${validation.missing.join(', ')}`);
-          return;
-        }
-        setConfigState(configData);
-      } catch (err) {
-        console.error('Failed to load config:', err);
-        setConfigError(`Failed to load config: ${err.message}`);
-      }
-    };
-    loadConfig();
-  }, []);
+    if (!storeConfig) return;
+    const validation = validateConfig(storeConfig);
+    if (!validation.valid) {
+      setConfigError(`Missing required config keys: ${validation.missing.join(', ')}`);
+      return;
+    }
+    setConfigError(null);
+    setConfigState(storeConfig);
+  }, [storeConfig]);
 
   // Load existing frame tags when component mounts
   useEffect(() => {
@@ -208,8 +204,6 @@ function TaggingMode() {
     setSelectedLocations([]);
     setIntensity(5);
     setSide('');
-    setTractionSource('');
-    setTractionDirection('');
     setNote('');
     setError(null);
 
@@ -246,8 +240,6 @@ function TaggingMode() {
         level: intensity,
         locations: selectedLocations,
         side: side || null,
-        traction_source: tractionSource || null,
-        traction_direction: tractionDirection || null,
         note: note.trim(),
       };
 
@@ -260,8 +252,6 @@ function TaggingMode() {
       setSelectedLocations([]);
       setIntensity(5);
       setSide('');
-      setTractionSource('');
-      setTractionDirection('');
       setNote('');
     } catch (err) {
       console.error('Failed to create tag:', err);
@@ -432,6 +422,8 @@ function TaggingMode() {
             <button onClick={() => seekToFrame(currentFrame + 10)}>+10 ⏭</button>
           </div>
 
+          <OnboardingBanner id={BANNER_TAGGING} />
+
           {/* Frame Info */}
           <div className="frame-info">
             <span>Frame: {currentFrame}</span>
@@ -484,15 +476,19 @@ function TaggingMode() {
           {/* Tag Type Buttons - from config */}
           <div className="tag-buttons-grid">
             {Object.entries(config.tag_types ?? {}).map(([id, label]) => (
-              <button
-                key={id}
-                className={`tag-button ${selectedTagType === id ? 'selected' : ''}`}
-                style={{ '--tag-color': getTagColor(id) }}
-                onClick={() => handleTagButtonClick(id)}
-              >
-                <span className="tag-emoji">{getTagEmoji(id)}</span>
-                <span className="tag-label">{label}</span>
-              </button>
+              // InfoTip sits beside the button, not inside it — a button
+              // nested in a button is invalid and swallows the click.
+              <span key={id} className="tag-button-wrap">
+                <button
+                  className={`tag-button ${selectedTagType === id ? 'selected' : ''}`}
+                  style={{ '--tag-color': getTagColor(id) }}
+                  onClick={() => handleTagButtonClick(id)}
+                >
+                  <span className="tag-emoji">{getTagEmoji(id)}</span>
+                  <span className="tag-label">{label}</span>
+                </button>
+                <InfoTip text={optionDescription(config, 'tag_types', id)} />
+              </span>
             ))}
           </div>
 
@@ -558,47 +554,6 @@ function TaggingMode() {
                     </label>
                   ))}
                 </div>
-              </div>
-
-              {/* Traction Source - from config */}
-              <div className="form-group">
-                <label>Traction Source (optional)</label>
-                <div className="radio-group-inline">
-                  <label className="radio-label">
-                    <input
-                      type="radio"
-                      name="traction_source"
-                      value=""
-                      checked={tractionSource === ''}
-                      onChange={() => setTractionSource('')}
-                    />
-                    None
-                  </label>
-                  {(config.traction_sources ?? []).map((ts) => (
-                    <label key={ts} className="radio-label">
-                      <input
-                        type="radio"
-                        name="traction_source"
-                        value={ts}
-                        checked={tractionSource === ts}
-                        onChange={() => setTractionSource(ts)}
-                      />
-                      {formatLabel(ts)}
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              {/* Traction Direction - free text */}
-              <div className="form-group">
-                <label>Traction Direction (optional)</label>
-                <input
-                  type="text"
-                  value={tractionDirection}
-                  onChange={(e) => setTractionDirection(e.target.value)}
-                  placeholder="e.g., internal rotation, lateral..."
-                  className="text-input"
-                />
               </div>
 
               {/* Intensity Slider */}
@@ -685,17 +640,7 @@ function TaggingMode() {
                         {tag.side && (
                           <span className="tag-side">{formatLabel(tag.side)}</span>
                         )}
-                        {tag.traction_source && (
-                          <span className="tag-traction">
-                            {formatLabel(tag.traction_source)}
-                          </span>
-                        )}
                       </div>
-                      {tag.traction_direction && (
-                        <div className="tag-traction-dir">
-                          Direction: {tag.traction_direction}
-                        </div>
-                      )}
                       {tag.note && <div className="tag-note">{tag.note}</div>}
                     </div>
                     <button

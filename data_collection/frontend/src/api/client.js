@@ -5,7 +5,7 @@
  * Updated for three-lens schema: Environment / Strategy / Outcome
  */
 import axios from 'axios';
-import { authHeader, requireAccessToken } from './auth';
+import { authHeader, requireAccessToken, refreshSession } from './auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -22,6 +22,35 @@ api.interceptors.request.use(async (config) => {
   Object.assign(config.headers, await authHeader());
   return config;
 });
+
+/**
+ * Refresh once on 401, then replay the request.
+ *
+ * Pose extraction can run for minutes before the first API call, which is long
+ * enough for an access token to expire mid-session. Rather than dumping the
+ * labeler back at the sign-in screen (and losing the extraction), force a
+ * refresh and retry exactly once. `_retriedAfterRefresh` guards against a loop
+ * when the refresh token is dead too — in that case the 401 propagates and the
+ * auth state listener in App will show the sign-in screen.
+ */
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const original = error.config;
+    const isAuthFailure = error.response?.status === 401;
+
+    if (!isAuthFailure || !original || original._retriedAfterRefresh) {
+      return Promise.reject(error);
+    }
+
+    original._retriedAfterRefresh = true;
+    const token = await refreshSession();
+    if (!token) return Promise.reject(error);
+
+    original.headers = { ...original.headers, Authorization: `Bearer ${token}` };
+    return api(original);
+  }
+);
 
 // ==================== CONFIGURATION ====================
 
@@ -131,34 +160,108 @@ export const getVideoCSV = async (videoId) => {
 };
 
 /**
- * Export labeled data for a video.
- * @param {number} videoId - The video ID to export
- * @param {boolean} deleteVideo - If true, delete the video file after export
- * @returns {Promise<{path: string, video_deleted: boolean}>}
+ * The pose CSV as text, for a video whose extraction is not in this session's
+ * store (a reload, or a video registered on another machine).
+ *
+ * Two hops by necessity: the API answers `307` to a presigned R2 URL, and that
+ * URL rejects an Authorization header — so the token goes on the first request
+ * and nothing goes on the second.
  */
-export const exportVideo = async (videoId, deleteVideo = true) => {
-  const response = await api.post(`/api/videos/${videoId}/export?delete_video=${deleteVideo}`);
+export const getVideoCsvText = async (videoId) => {
+  const headers = await authHeader();
+  const response = await fetch(`${API_BASE_URL}/api/videos/${videoId}/csv`, { headers });
+  if (!response.ok) {
+    throw new Error(`Could not load pose data (${response.status})`);
+  }
+  return response.text();
+};
+
+/**
+ * Export labeled data for a video.
+ *
+ * v3 takes no query params — the video is no longer deleted as a side effect
+ * of exporting.
+ *
+ * @param {number} videoId - The video ID to export
+ * @returns {Promise<{video_id: number, r2_export_key: string}>}
+ */
+export const exportVideo = async (videoId) => {
+  const response = await api.post(`/api/videos/${videoId}/export`);
   return response.data;
 };
 
 /**
- * Download the exported CSV file.
+ * Presigned URL for the exported CSV.
+ *
+ * v3 answers `307` to a presigned R2 URL rather than streaming a body. Axios
+ * follows redirects transparently in the browser, and the presigned URL rejects
+ * the Authorization header we would otherwise attach, so this uses a bare fetch
+ * with redirect: 'manual' to read the Location out instead of following it.
+ *
+ * Falls back to following the redirect and reading `response.url` on browsers
+ * where an opaque redirect hides the Location header.
+ *
+ * @param {number} videoId
+ * @returns {Promise<string>} a URL that downloads the CSV
+ */
+export const getExportDownloadUrl = async (videoId) => {
+  const headers = await authHeader();
+  const target = `${API_BASE_URL}/api/videos/${videoId}/export/download`;
+
+  const manual = await fetch(target, { method: 'GET', headers, redirect: 'manual' });
+  const location = manual.headers.get('Location');
+  if (location) return location;
+
+  // Opaque redirect: follow it and use where we landed.
+  const followed = await fetch(target, { method: 'GET', headers });
+  if (!followed.ok) {
+    throw new Error(`Could not get the download link (${followed.status})`);
+  }
+  return followed.url;
+};
+
+/**
+ * Download the exported CSV file by navigating to its presigned URL.
  * @param {number} videoId - The video ID
  */
 export const downloadExport = async (videoId) => {
-  const response = await api.get(`/api/videos/${videoId}/export/download`, {
-    responseType: 'blob',
-  });
+  const url = await getExportDownloadUrl(videoId);
+  window.location.assign(url);
+};
 
-  // Create download link
-  const url = window.URL.createObjectURL(new Blob([response.data]));
-  const link = document.createElement('a');
-  link.href = url;
-  link.setAttribute('download', `video_${videoId}_labeled.csv`);
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(url);
+// ==================== HOLDS ====================
+
+/** Every hold marked on a video. */
+export const getHolds = async (videoId) => {
+  const response = await api.get(`/api/videos/${videoId}/holds`);
+  return response.data;
+};
+
+/**
+ * Create many holds at once — what the detector posts after the first frame.
+ * @param {number} videoId
+ * @param {Array<{bbox_x:number,bbox_y:number,bbox_w:number,bbox_h:number,source?:string}>} holds
+ */
+export const createHoldsBulk = async (videoId, holds) => {
+  const response = await api.post(`/api/videos/${videoId}/holds`, { holds });
+  return response.data;
+};
+
+/** Create a single hold — what drag-to-add posts. */
+export const createHold = async (videoId, hold) => {
+  const response = await api.post('/api/holds', { video_id: videoId, ...hold });
+  return response.data;
+};
+
+/** Move, resize, or re-source a hold. */
+export const updateHold = async (holdId, fields) => {
+  const response = await api.put(`/api/holds/${holdId}`, fields);
+  return response.data;
+};
+
+/** Delete a hold. */
+export const deleteHold = async (holdId) => {
+  await api.delete(`/api/holds/${holdId}`);
 };
 
 // ==================== MOVES (Lens 2: Strategy) ====================
