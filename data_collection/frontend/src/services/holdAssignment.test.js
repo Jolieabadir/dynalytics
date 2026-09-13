@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   boxCenter,
+  distanceToBox,
   nearestHold,
   normalizedLandmark,
   reachingSide,
@@ -55,6 +56,27 @@ describe('boxCenter', () => {
       x: 0.25,
       y: 0.5,
     });
+  });
+});
+
+describe('distanceToBox', () => {
+  it('is zero for a point inside the box', () => {
+    expect(distanceToBox({ x: 0.30, y: 0.40 }, LEFT_HOLD)).toBe(0);
+  });
+
+  it('measures to the edge, not the centre', () => {
+    // 0.1 to the left of a box whose left edge is at 0.27.
+    expect(distanceToBox({ x: 0.17, y: 0.40 }, LEFT_HOLD)).toBeCloseTo(0.10, 6);
+  });
+
+  it('prefers a big hold the hand is inside over a small one further off', () => {
+    // The exact failure point-to-centre distance would get wrong.
+    const big = { id: 10, bbox_x: 0.20, bbox_y: 0.20, bbox_w: 0.30, bbox_h: 0.30 };
+    const small = { id: 11, bbox_x: 0.52, bbox_y: 0.34, bbox_w: 0.02, bbox_h: 0.02 };
+    const insideBig = { x: 0.48, y: 0.35 };
+
+    // Centre distance would pick `small`; edge distance correctly picks `big`.
+    expect(nearestHold([big, small], insideBig)).toBe(big);
   });
 });
 
@@ -182,21 +204,67 @@ describe('suggestHoldSlots', () => {
     });
   });
 
-  it('falls back to the ankle when no heel is visible', () => {
-    // The shipped CSV has no foot_index, so heels lead and ankles back them up.
-    expect(FOOT_POINTS[0]).toBe('left_heel');
+  it('prefers the toe, then the heel, then the ankle', () => {
+    // The 33-landmark CSV has foot_index; the 15-landmark one does not. The
+    // preference list has to cover both.
+    expect(FOOT_POINTS[0]).toBe('left_foot_index');
+    expect(FOOT_POINTS).toContain('left_heel');
     expect(FOOT_POINTS).toContain('left_ankle');
+    expect(FOOT_POINTS.indexOf('left_heel')).toBeLessThan(
+      FOOT_POINTS.indexOf('left_ankle')
+    );
+  });
 
+  it('falls back down the foot list as points become invisible', () => {
+    const endRow = row({ left_wrist: [0.30, 0.40], right_wrist: [0.70, 0.15] });
+    const base = { left_wrist: [0.30, 0.40], right_wrist: [0.70, 0.40] };
+
+    // Only an ankle is usable: heel present but below the visibility floor.
+    const ankleOnly = row({
+      ...base,
+      left_heel: [0.50, 0.85, 0.1],
+      right_ankle: [0.50, 0.85],
+    });
+    expect(
+      suggestHoldSlots({ holds: WALL, startRow: ankleOnly, endRow, frameSize: FRAME }).foot
+    ).toBe(4);
+
+    // With a toe visible it is used too — same hold, via the preferred point.
+    const withToe = row({ ...base, left_foot_index: [0.50, 0.85] });
+    expect(
+      suggestHoldSlots({ holds: WALL, startRow: withToe, endRow, frameSize: FRAME }).foot
+    ).toBe(4);
+  });
+
+  it('uses the fingertip in preference to the wrist when the CSV has one', () => {
+    // 33-landmark CSV: the fingertip is on the hold, the wrist trails behind
+    // it and is nearer a different hold. The fingertip must win.
+    const startRow = row({
+      left_index: [0.30, 0.40], // on LEFT_HOLD
+      left_wrist: [0.70, 0.40], // nearer RIGHT_HOLD
+      right_index: [0.70, 0.40],
+      right_wrist: [0.70, 0.40],
+    });
+    const endRow = row({ left_index: [0.30, 0.40], right_index: [0.70, 0.15] });
+
+    const out = suggestHoldSlots({ holds: WALL, startRow, endRow, frameSize: FRAME });
+    expect(out.start_left).toBe(1);
+  });
+
+  it('still works on the 15-landmark CSV, which has no fingertip or toe', () => {
     const startRow = row({
       left_wrist: [0.30, 0.40],
       right_wrist: [0.70, 0.40],
-      left_heel: [0.50, 0.85, 0.1], // present but not visible enough
-      right_ankle: [0.50, 0.85],
+      left_heel: [0.50, 0.85],
     });
     const endRow = row({ left_wrist: [0.30, 0.40], right_wrist: [0.70, 0.15] });
 
-    const out = suggestHoldSlots({ holds: WALL, startRow, endRow, frameSize: FRAME });
-    expect(out.foot).toBe(4);
+    expect(suggestHoldSlots({ holds: WALL, startRow, endRow, frameSize: FRAME })).toEqual({
+      start_left: 1,
+      start_right: 2,
+      end: 3,
+      foot: 4,
+    });
   });
 
   it('does not blow up on a pose-less start frame', () => {

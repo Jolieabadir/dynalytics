@@ -9,21 +9,63 @@
  *   end          ← box nearest the reaching wrist at frame_end
  *   foot         ← box nearest either foot point at frame_start
  *
- * ⚠️ Landmark contract note. The brief specified a 33-landmark CSV and a
- * `foot_index` point. The CSV this app actually writes has **15** landmarks
- * (see frontend REPORT.md §1.4) and carries **no foot_index** — the lowest
- * foot points available are `left_heel` / `right_heel`, with
- * `left_ankle` / `right_ankle` behind them. So the foot slot is suggested from
- * heels, falling back to ankles. If the CSV ever grows to the full 33-point
- * set, add 'left_foot_index'/'right_foot_index' to the front of FOOT_POINTS
- * and nothing else here changes.
+ * Landmark contract. This works against BOTH widths of the pose CSV, because
+ * the two exist side by side right now:
+ *
+ *   - the 15-landmark CSV this branch was cut from — wrists, heels, ankles,
+ *     and no fingertip or toe;
+ *   - the 33-landmark CSV that landed on feat/pose-extractor-v2 while this
+ *     branch was in flight, which adds `*_index` fingertip and toe points.
+ *
+ * So each slot walks a preference list and takes the first point that is
+ * actually present and visible: fingertip before wrist, toe before heel before
+ * ankle. A fingertip sits much closer to the hold the climber is really on, so
+ * when the 33-landmark CSV is in play the suggestions get better for free, and
+ * nothing breaks when it is not.
+ *
+ * ⚠️ See REPORT.md §C9: feat/pose-extractor-v2 also gained
+ * `src/services/holdMatching.js`, a tested-but-unwired primitives module that
+ * overlaps this one. These need reconciling into a single module at merge —
+ * the distance function here was deliberately converged onto theirs to make
+ * that a deletion rather than a rewrite.
  *
  * Everything in this module is pure: plain objects in, plain objects out, no
  * DOM and no store. That is what makes it directly testable.
  */
 
-/** Foot landmarks, best first. See the note above about foot_index. */
-export const FOOT_POINTS = ['left_heel', 'right_heel', 'left_ankle', 'right_ankle'];
+/**
+ * Foot landmarks, best first: toe, then heel, then ankle.
+ * `*_foot_index` exists only in the 33-landmark CSV — see the header.
+ */
+export const FOOT_POINTS = [
+  'left_foot_index',
+  'right_foot_index',
+  'left_heel',
+  'right_heel',
+  'left_ankle',
+  'right_ankle',
+];
+
+/**
+ * Hand landmarks for one side, best first. The fingertip (`*_index`) is what
+ * actually contacts the hold; the wrist is up to a hand's width away from it,
+ * so it is the fallback rather than the first choice.
+ */
+export function handPoints(side) {
+  return [`${side}_index`, `${side}_wrist`];
+}
+
+/**
+ * First point in a preference list that is present and visible enough.
+ * @returns {{x:number,y:number}|null} normalized
+ */
+export function firstVisiblePoint(row, names, frameSize) {
+  for (const name of names) {
+    const point = normalizedLandmark(row, name, frameSize);
+    if (point) return point;
+  }
+  return null;
+}
 
 /** Minimum MediaPipe visibility before a landmark is trusted for a suggestion. */
 export const MIN_VISIBILITY = 0.5;
@@ -69,6 +111,21 @@ export function boxCenter(hold) {
 }
 
 /**
+ * Shortest distance from a normalized point to a hold box; 0 when inside.
+ *
+ * Point-to-rectangle rather than point-to-centre, deliberately: with centre
+ * distance a big hold the hand is resting *inside* can lose to a small hold
+ * further away, which is exactly backwards.
+ */
+export function distanceToBox(point, hold) {
+  const right = hold.bbox_x + hold.bbox_w;
+  const bottom = hold.bbox_y + hold.bbox_h;
+  const dx = Math.max(hold.bbox_x - point.x, 0, point.x - right);
+  const dy = Math.max(hold.bbox_y - point.y, 0, point.y - bottom);
+  return Math.hypot(dx, dy);
+}
+
+/**
  * The hold whose centre is closest to a normalized point.
  *
  * `maxDistance` guards against assigning a hold on the far side of the wall
@@ -85,8 +142,7 @@ export function nearestHold(holds, point, maxDistance = 0.15) {
   let bestDistance = Infinity;
 
   for (const hold of holds) {
-    const c = boxCenter(hold);
-    const distance = Math.hypot(c.x - point.x, c.y - point.y);
+    const distance = distanceToBox(point, hold);
     if (distance < bestDistance) {
       bestDistance = distance;
       best = hold;
@@ -108,8 +164,9 @@ export function nearestHold(holds, point, maxDistance = 0.15) {
  */
 export function reachingSide(startRow, endRow, frameSize) {
   const travel = (side) => {
-    const a = normalizedLandmark(startRow, `${side}_wrist`, frameSize);
-    const b = normalizedLandmark(endRow, `${side}_wrist`, frameSize);
+    const names = handPoints(side);
+    const a = firstVisiblePoint(startRow, names, frameSize);
+    const b = firstVisiblePoint(endRow, names, frameSize);
     if (!a || !b) return null;
     return Math.hypot(b.x - a.x, b.y - a.y);
   };
@@ -142,27 +199,28 @@ export function suggestHoldSlots({ holds, startRow, endRow, frameSize, maxDistan
 
   const idOf = (hold) => (hold ? hold.id : null);
 
-  // Hands at the start frame.
+  // Hands at the start frame — fingertip if the CSV has one, else the wrist.
   suggestion.start_left = idOf(
-    nearestHold(holds, normalizedLandmark(startRow, 'left_wrist', frameSize), maxDistance)
+    nearestHold(holds, firstVisiblePoint(startRow, handPoints('left'), frameSize), maxDistance)
   );
   suggestion.start_right = idOf(
-    nearestHold(holds, normalizedLandmark(startRow, 'right_wrist', frameSize), maxDistance)
+    nearestHold(holds, firstVisiblePoint(startRow, handPoints('right'), frameSize), maxDistance)
   );
 
   // The reaching hand at the end frame.
   const side = reachingSide(startRow, endRow, frameSize);
   if (side) {
     suggestion.end = idOf(
-      nearestHold(holds, normalizedLandmark(endRow, `${side}_wrist`, frameSize), maxDistance)
+      nearestHold(holds, firstVisiblePoint(endRow, handPoints(side), frameSize), maxDistance)
     );
   }
 
-  // The foot. First foot point that is both present and close to a box wins.
-  for (const point of FOOT_POINTS) {
+  // The foot. First foot point that is both visible and close to a box wins,
+  // in preference order: toe, then heel, then ankle.
+  for (const name of FOOT_POINTS) {
     const hold = nearestHold(
       holds,
-      normalizedLandmark(startRow, point, frameSize),
+      normalizedLandmark(startRow, name, frameSize),
       maxDistance
     );
     if (hold) {
