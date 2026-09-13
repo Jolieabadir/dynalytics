@@ -137,3 +137,262 @@ performance:
 **The frontend currently has no Supabase client at all** — `@supabase/supabase-js` is not
 in `package.json` and nothing reads `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY`, though
 both are present in `.env`. Resolving that is recorded under the defaults in §3.
+
+---
+
+## 2. What changed, file by file
+
+| File | Change |
+|---|---|
+| `src/services/poseMath.js` | **New.** All pure math: `detectFps`, `frameIndexFor`, `totalFramesFor`, `computeResult`, `buildRows`, `framesToCSV`, `csvHeaders`, plus the angle geometry and `LANDMARK_MAP`/`ANGLE_DEFINITIONS`. No MediaPipe or DOM import, so it is testable in Node. |
+| `src/services/PoseExtractor.js` | **Rewritten.** Play-through capture loop, module-level landmarker singleton, fps detection, typed errors, cancel, visibility handling. Re-exports the pure helpers so existing importers keep working. |
+| `src/utils/frames.js` | **New.** `fpsOf` / `timeToFrame` / `frameToTime` / `frameToMs` / `totalFrames`. One rounding rule for the whole app. |
+| `src/components/VideoUpload.jsx` | **Rewritten.** Time-based progress, cancel, tab notice, typed error rendering, desktop hint, register with retry, presigned video upload. |
+| `src/api/client.js` | Auth interceptor; `registerVideo` (JSON + backoff), `getUploadUrl`, `putVideoToR2`, `confirmUpload`, `uploadOriginalVideo`. Removed `uploadVideo` (endpoint no longer exists). |
+| `src/api/auth.js` | **New.** Supabase client + `getAccessToken` / `requireAccessToken` / `authHeader`. |
+| `src/components/VideoPlayer.jsx` | `|| 30` removed; conversions via `utils/frames`. Frame-from-time now **rounds** instead of flooring, matching the extractor. |
+| `src/components/TaggingMode.jsx` | `|| 30` removed; 5 conversion sites via `utils/frames`. |
+| `src/components/MoveForm.jsx` | `|| 30` removed; `timestamp_start_ms`/`timestamp_end_ms` via `frameToMs`. |
+| `src/App.css` | Added `.cancel-button`. |
+| `scripts/make_test_video.sh` | **New.** ffmpeg clip generator (installs ffmpeg if missing). |
+| `scripts/test_pose_math.mjs` | **New.** 25 tests. |
+| `scripts/fixtures/frame_times_{30,60}fps.json` | **New.** Real presentation times from the generated clips. |
+| `package.json` | Added `@supabase/supabase-js`; `npm test`, `npm run make-test-videos`. |
+| `.gitignore` | `.env` (was **not** ignored before) and `test-videos/`. |
+
+`MovesList.jsx`, `SkeletonOverlay.jsx`, `ExportService.js`, `useStore.js`, `App.jsx` are unchanged.
+
+### Why it should be fast now
+
+The old loop set `currentTime` and waited for `seeked` once per frame. On long-GOP
+phone footage each seek can re-decode from the preceding keyframe, so cost grows with
+GOP length rather than frame count — thousands of seeks for a 2-minute clip.
+
+The new loop decodes each frame exactly once, in presentation order, which is the
+same work the video element does during ordinary playback. The floor is therefore the
+clip's own duration, and the ceiling is set by whether inference keeps up. Pausing on
+every frame callback means that when inference is slower than realtime the clip simply
+takes longer — it never silently skips a frame, which a plain "detect on every
+callback while playing" loop would do.
+
+## 3. Defaults taken
+
+Per instruction, decisions were made without asking and are recorded here.
+
+1. **Every frame processed**, no fps sampling, as specified.
+2. **512px long-edge** inference canvas. Landmarks are denormalized against the
+   **original** resolution, so the CSV's pixel coordinates are unchanged by this.
+3. **MediaPipe Tasks PoseLandmarker, lite model, GPU→CPU fallback, `runningMode: 'VIDEO'`**,
+   as specified. The project was already on `@mediapipe/tasks-vision` (0.10.32), so
+   **no legacy `@mediapipe/pose` migration was needed** — but the model changed from
+   `pose_landmarker_full` to `pose_landmarker_lite` per the brief. Expect slightly
+   lower landmark accuracy in exchange for the speed.
+4. **CDN pinned to 0.10.32** rather than `@latest`, matching `package-lock.json`. The
+   WASM glue and JS wrapper must agree, and `@latest` defeats CDN caching.
+5. **`requestVideoFrameCallback` required**; no seek fallback. A browser without it
+   gets a message naming Chrome, Edge and Safari in place of the upload panel.
+6. **CSV contract kept as shipped** (75 columns, 15 landmarks, 12 angles) rather than
+   the 33-landmark/10-angle shape named in the brief. See §1.4 — this is the one place
+   the brief and the code disagreed, and the code won. Raise it if that was wrong.
+7. **`REPORT.md` lives in `data_collection/frontend/`**, since the backend has its own.
+8. **Holes are filled, not skipped.** A missing frame index produces a pose-less row
+   rather than a gap, because `SkeletonOverlay` indexes the CSV positionally.
+9. **`Math.round`, not `Math.floor`**, for both `frame_index` and `total_frames`.
+   The old floor dropped the last partial frame and disagreed with the player.
+10. **Fallback fps of 30** survives in `PoseExtractor.js` for clips with fewer than 3
+    presented frames, where detection is impossible. Justified in §5.
+11. **`@supabase/supabase-js` added** to mint the bearer token the backend now requires.
+    This is the token *reader* only — **no sign-in UI**. See §7 for the handoff.
+12. **Original-video upload is best-effort.** It runs after `register`, so a failure
+    there logs a warning rather than discarding a successful extraction.
+13. **Register retries only transport errors and 5xx.** A 401 or 413 will not become
+    true on a retry, so those fail immediately.
+14. **`.env` copied** from the original checkout and **added to `.gitignore`**. It was
+    not ignored before, which was a live risk of committing keys. It is not committed.
+
+## 4. Verification
+
+`npm test` — **25 tests, all passing.**
+
+```
+✔ detectFps recovers each supported rate from ideal timings
+✔ detectFps snaps NTSC rates to their nominal neighbour
+✔ detectFps survives a stalled interval
+✔ detectFps tolerates jitter within a rate
+✔ detectFps returns null when there is too little to measure
+✔ detectFps identifies the real recorded clips
+✔ frameIndexFor rounds to the nearest frame
+✔ totalFramesFor rounds rather than truncating
+✔ every recorded presentation time maps to its own frame index
+✔ rows are contiguous from 0 with no gaps, for both clips
+✔ row count matches duration x fps for both clips
+✔ timestamp equals frame_index / fps to within 1ms
+✔ timestamps increase strictly
+✔ duplicate presentation times collapse to one row
+✔ a missing frame is filled rather than left as a gap
+✔ out-of-order samples are sorted before indexing
+✔ buildRows on no samples yields no rows
+✔ the header is byte-identical to the shipped contract
+✔ every row carries exactly 75 fields
+✔ a pose-less frame is encoded as zero speed and empty columns
+✔ the CSV has no trailing newline and one header line
+✔ no field can contain a comma, so unquoted CSV stays parseable
+✔ landmarks denormalize against the source resolution, not the canvas
+✔ centre-of-mass speed is zero on the first frame and measured after
+✔ a 60fps clip read as 30fps loses half the frames — the original bug
+```
+
+The three checks the brief asked for, confirmed for **both** clips:
+
+- **Row count ≈ duration × fps** — 300 rows for the 30fps clip, 600 for the 60fps clip,
+  against ffprobe's exact counts of 300 and 600.
+- **`frame_index` monotonic with no gaps** — asserted index-by-index from 0.
+- **`timestamp = frame_index / fps` within 1ms** — exact, since `timestamp_ms` is
+  derived from the index rather than measured independently.
+
+**Byte-identical output confirmed separately.** The new `framesToCSV` was diffed
+against the old implementation (recovered from `aea9920`) over 200 synthetic frames
+including pose-less frames and null angles: **243,156 bytes from both, identical.**
+
+`npm run build` succeeds. ESLint reports **zero problems in every new or changed file**;
+the 10 errors and 2 warnings that remain in `MovesList`, `SkeletonOverlay`, `VideoPlayer`
+and `useStore` are all pre-existing — verified by linting `VideoPlayer.jsx` at `aea9920`,
+which produces the same 3 errors and 1 warning, only shifted a line by the added import.
+
+### Why not Playwright
+
+MediaPipe needs a GPU-backed browser; in a headless container it either falls back to a
+CPU path that measures nothing useful or fails outright. A Node test over recorded
+frame timings covers exactly the logic that was wrong before, and the parts it cannot
+reach are listed as manual checks in §6.
+
+## 5. Justification for every remaining `30` in `src`
+
+```
+src/utils/frames.js:6            — the string "|| 30" inside a comment explaining the bug
+src/components/TaggingMode.jsx:28 — unstable: '#eab308'  (a colour, not a rate)
+src/services/PoseExtractor.js:53  — FALLBACK_FPS = 30
+src/services/poseMath.js:30       — 30: 'right_heel'   (a MediaPipe landmark index)
+src/services/poseMath.js:44       — KNOWN_FPS = [24, 25, 30, ...]  (a candidate, not a default)
+src/services/PoseExtractor.js     — detectFps(...) ?? FALLBACK_FPS   (x2)
+```
+
+Only `FALLBACK_FPS` is a real fps default, and it is materially different from the old
+`const fps = 30`. The old one was an **assumption applied to every video**. This one is
+reached only when a clip presents fewer than three frames, so no interval exists to
+measure. Every real clip measures its own rate. **No hardcoded 30 is on the path of a
+normal upload.**
+
+## 6. Step 6 — dev server and browser run
+
+The dev server runs clean (`VITE v7.3.1 ready in 727 ms`, `http://localhost:5173/`) and
+`npm run build` succeeds.
+
+**No end-to-end browser timing was captured, and the automated attempt is worth
+describing so it isn't repeated.** The app shell stops at `Loading Dynalytix…` without a
+backend, so the extractor was driven directly in the page instead — the module imported
+from the dev server, the 60fps clip fetched as a `File`. That part worked:
+`requestVideoFrameCallback` present, clip served, module loaded.
+
+The run never finished. The automation tab reports `document.hidden === true` and could
+not be foregrounded (a screenshot, and `osascript … activate`, both left it hidden), and
+Chrome throttles a background tab hard enough that a 10-second clip had not completed
+after roughly two minutes. Forcing `document.hidden` to `false` and dispatching
+`visibilitychange` resumed the loop but not the throttling; a bounded 300-call inference
+benchmark, which needs no frame presentation at all, also failed to finish in 85s. At
+that point the renderer stopped answering CDP for 45s. **These numbers measure Chrome's
+background-tab throttling, not the extractor, so none of them are reported as timings.**
+
+Two things this did establish, both real:
+
+- The **`visibilitychange` pause works in a real browser** — the loop stopped precisely
+  when the tab was backgrounded, which is what stalled the benchmark.
+- The module **loads and runs under Vite** with no import or resolution errors.
+
+**Before/after timing is therefore unmeasured.** The reasoning for the expected
+improvement is in §2; the number itself has to come from the manual test below.
+
+## 7. The manual test to run on your laptop
+
+Do this in a **foreground** Chrome window with a real 60fps iPhone clip.
+
+```bash
+cd data_collection/frontend
+npm install
+npm run dev                       # http://localhost:5173
+# and, in another shell, the backend, or register will 401
+```
+
+You must be **signed in** — the backend rejects every `/api` call without a Supabase
+bearer token, and this branch adds no login screen (§8). With no session you should see
+*"You are not signed in…"*, which is itself a valid check of the error path.
+
+1. **Timing.** Open DevTools → Console, upload a 2-minute 60fps clip, and read the line
+   `[PoseExtractor] N frames in Xs (clip Ys at 60fps, Zx realtime)`.
+   **Expect `Z` around 1.0 or below.** Anything above ~2 means inference is the
+   bottleneck — check the same console for
+   `GPU delegate unavailable, falling back to CPU`, which would explain it.
+2. **fps.** The progress line should read **`60 fps`**, not 30. This is the core fix.
+3. **Frame count.** `N` should be within a frame or two of `duration × 60`
+   (~7,200 for 2 minutes). Roughly half that means fps detection regressed.
+4. **Progress + cancel.** The bar should track video time smoothly. Hit **Cancel**
+   mid-run: it should return to the picker immediately with no error, and the same file
+   should be selectable again.
+5. **Tab notice.** While extracting, confirm *"Keep this tab open"*. Switch to another
+   tab for a few seconds and come back — it should say it paused, then resume and finish
+   with the **correct total frame count**. (This is the behaviour that blocked automation
+   in §6, so it is worth confirming by hand.)
+6. **HEVC path.** Set iPhone Camera → Formats → **High Efficiency**, record a short
+   clip, and upload it. Expect *"This video format can't be decoded in this browser…"*
+   within about 5 seconds — not a hang and not a CSV full of empty rows. Then switch to
+   **Most Compatible** and confirm the same shot works.
+7. **Overlay alignment.** After extraction, scrub the player and check the skeleton sits
+   on the climber. Misalignment would mean the 512px downscale leaked into the stored
+   coordinates — the one regression the row-level tests cannot see.
+8. **Frame accuracy.** Mark a move at a distinctive instant, then confirm the frame
+   number in the player matches the moment on screen. On a 60fps clip the old build was
+   off by 2×; this is the user-visible version of that check.
+9. **Synthetic clips.** `npm run make-test-videos`, then upload `test_30fps.mp4` and
+   `test_60fps.mp4`. Expect exactly 30/60 fps detected and ~300/~600 frames.
+
+## 8. What the backend and the next frontend pass must know
+
+**Nothing in this branch requires a backend change.** It was written against
+`api.py` as it stands on `feat/supabase-r2-schema-v3`. Three things to be aware of:
+
+1. **Sign-in is still missing, and it blocks uploads.** This branch adds
+   `src/api/auth.js` — the token reader — and the bearer header on every request, but
+   no login UI. **`register` will 401 for any user who has not signed in by some other
+   means.** That screen is the single highest-priority follow-up; `.env` already has
+   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+2. **The rest of the frontend is still on the old API contract.** §7 of the backend
+   report lists breaking changes this branch did **not** touch, because they are outside
+   pose extraction: `moves` lost `timing`/`dyno_style`/`contextual_data`/`tags` and
+   gained `confidence`; `environments` was restructured into four named slots;
+   `export` and `csv` now return `307` redirects to presigned URLs rather than bodies;
+   `/api/holds` is new. `MoveForm`, `TaggingMode` and `ExportService` will need that pass.
+   **`ExportService.js` still sends `?delete_video=true`, which the new endpoint ignores.**
+3. **Store and API shapes.**
+   - `currentVideo` is now the new register response: `path` and `csv_path` are **gone**,
+     replaced by `r2_video_key` / `r2_pose_csv_key` / `r2_export_key`. Anything reading
+     `currentVideo.path` will get `undefined`.
+   - **`currentVideo.fps` is now a measured float and is authoritative.** No component
+     may reintroduce a default; use `fpsOf` from `src/utils/frames.js`, which returns
+     `null` rather than guessing.
+   - `total_frames` is now `round(duration × fps)`, so it may be one higher than the old
+     floored value for the same clip.
+   - The store itself is unchanged — no new fields, no renames.
+
+### Known limitations
+
+- Extraction is **single-threaded on the main thread**. A Web Worker with
+  `OffscreenCanvas` would keep the UI responsive on slow machines; not done here, as it
+  would have meant restructuring the capture loop around a second MediaPipe context.
+- **Switching tabs pauses extraction.** Deliberate — background throttling makes the
+  capture loop unreliable — but it does mean a long clip needs the tab left open.
+- The **lite** model is less accurate than the `full` model this replaces. If landmark
+  quality regresses noticeably on real climbing footage, `MODEL_URL` in
+  `PoseExtractor.js` is a one-line change back to `pose_landmarker_full`, at a cost in
+  speed.
+- **No end-to-end timing has been measured** (§6). The headline performance claim is
+  reasoned, not observed.
