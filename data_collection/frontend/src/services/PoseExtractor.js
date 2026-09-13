@@ -16,6 +16,18 @@
  * problem being removed.
  */
 import { PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import {
+  LANDMARK_MAP,
+  ANGLE_DEFINITIONS,
+  KNOWN_FPS,
+  detectFps,
+  frameIndexFor,
+  totalFramesFor,
+  computeResult,
+  buildRows,
+  framesToCSV,
+  csvHeaders,
+} from './poseMath';
 
 // Pinned to the version in package-lock.json. The WASM glue and the JS wrapper
 // must agree, and `@latest` also defeats CDN caching between uploads.
@@ -27,47 +39,18 @@ const MODEL_URL =
 /** Longest edge of the inference canvas. Input downscale cap. */
 const MAX_INFERENCE_EDGE = 512;
 
-/** fps values a phone or camera actually produces. Detection snaps to these. */
-const KNOWN_FPS = [24, 25, 30, 48, 50, 60, 120];
-
 /** How much of the clip to sample before deciding on fps. */
 const FPS_SAMPLE_SECONDS = 2;
 
 /** How long to wait for the first frame callback before calling it a decode failure. */
 const FIRST_FRAME_TIMEOUT_MS = 5000;
 
-// MediaPipe landmark indices we care about (maps to our landmark names)
-const LANDMARK_MAP = {
-  0: 'nose',
-  11: 'left_shoulder',
-  12: 'right_shoulder',
-  13: 'left_elbow',
-  14: 'right_elbow',
-  15: 'left_wrist',
-  16: 'right_wrist',
-  23: 'left_hip',
-  24: 'right_hip',
-  25: 'left_knee',
-  26: 'right_knee',
-  27: 'left_ankle',
-  28: 'right_ankle',
-  29: 'left_heel',
-  30: 'right_heel',
-};
-
-// Angle definitions: [name, pointA, pointB (vertex), pointC]
-const ANGLE_DEFINITIONS = [
-  ['left_elbow', 'left_shoulder', 'left_elbow', 'left_wrist'],
-  ['right_elbow', 'right_shoulder', 'right_elbow', 'right_wrist'],
-  ['left_shoulder', 'left_hip', 'left_shoulder', 'left_elbow'],
-  ['right_shoulder', 'right_hip', 'right_shoulder', 'right_elbow'],
-  ['left_hip', 'left_shoulder', 'left_hip', 'left_knee'],
-  ['right_hip', 'right_shoulder', 'right_hip', 'right_knee'],
-  ['left_knee', 'left_hip', 'left_knee', 'left_ankle'],
-  ['right_knee', 'right_hip', 'right_knee', 'right_ankle'],
-  ['left_ankle', 'left_knee', 'left_ankle', 'left_heel'],
-  ['right_ankle', 'right_knee', 'right_ankle', 'right_heel'],
-];
+/**
+ * Last-resort fps when a clip is too short to measure (fewer than 3 presented
+ * frames). Not an assumption about the input the way the old hardcoded 30 was:
+ * detection has already failed by the time this is reached.
+ */
+const FALLBACK_FPS = 30;
 
 const DECODE_UNSUPPORTED_MESSAGE =
   "This video format can't be decoded in this browser. On iPhone, set " +
@@ -104,104 +87,6 @@ export function supportsFrameCallback() {
     typeof HTMLVideoElement !== 'undefined' &&
     typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function'
   );
-}
-
-// ==================== GEOMETRY ====================
-
-function angleBetween(a, b, c) {
-  // Calculate angle at point b given three landmarks
-  const ab = { x: a.x - b.x, y: a.y - b.y };
-  const cb = { x: c.x - b.x, y: c.y - b.y };
-  const dot = ab.x * cb.x + ab.y * cb.y;
-  const magAB = Math.sqrt(ab.x ** 2 + ab.y ** 2);
-  const magCB = Math.sqrt(cb.x ** 2 + cb.y ** 2);
-  if (magAB === 0 || magCB === 0) return null;
-  const cosAngle = Math.max(-1, Math.min(1, dot / (magAB * magCB)));
-  return Math.acos(cosAngle) * (180 / Math.PI);
-}
-
-function midpoint(a, b) {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-    z: (a.z + b.z) / 2,
-  };
-}
-
-function calculateUpperBack(landmarks) {
-  const ls = landmarks['left_shoulder'];
-  const rs = landmarks['right_shoulder'];
-  if (!ls || !rs) return null;
-  const mid = midpoint(ls, rs);
-  return angleBetween(ls, mid, rs);
-}
-
-function calculateLowerBack(landmarks) {
-  const ls = landmarks['left_shoulder'];
-  const rs = landmarks['right_shoulder'];
-  const lh = landmarks['left_hip'];
-  const rh = landmarks['right_hip'];
-  const lk = landmarks['left_knee'];
-  const rk = landmarks['right_knee'];
-  if (!ls || !rs || !lh || !rh || !lk || !rk) return null;
-  const shoulderMid = midpoint(ls, rs);
-  const hipMid = midpoint(lh, rh);
-  const kneeMid = midpoint(lk, rk);
-  return angleBetween(shoulderMid, hipMid, kneeMid);
-}
-
-function distance(a, b) {
-  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
-}
-
-// ==================== fps DETECTION ====================
-
-/**
- * Infer fps from the intervals between presented frames.
- *
- * Median rather than mean: a single long interval (a stalled decode, a
- * backgrounded tab) would drag a mean badly, but moves a median barely at all.
- * The result snaps to the nearest plausible capture rate, since a measured
- * 59.94 and a measured 60.02 are both a 60fps camera.
- */
-export function detectFps(mediaTimes) {
-  if (!mediaTimes || mediaTimes.length < 3) return null;
-
-  const deltas = [];
-  for (let i = 1; i < mediaTimes.length; i++) {
-    const d = mediaTimes[i] - mediaTimes[i - 1];
-    if (d > 0) deltas.push(d);
-  }
-  if (deltas.length === 0) return null;
-
-  deltas.sort((a, b) => a - b);
-  const mid = Math.floor(deltas.length / 2);
-  const median =
-    deltas.length % 2 === 0 ? (deltas[mid - 1] + deltas[mid]) / 2 : deltas[mid];
-  if (!(median > 0)) return null;
-
-  const measured = 1 / median;
-
-  let best = KNOWN_FPS[0];
-  let bestDiff = Infinity;
-  for (const candidate of KNOWN_FPS) {
-    const diff = Math.abs(candidate - measured);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = candidate;
-    }
-  }
-  return best;
-}
-
-/** frame_index for a presentation time, per the detected rate. */
-export function frameIndexFor(mediaTimeSeconds, fps) {
-  return Math.round(mediaTimeSeconds * fps);
-}
-
-/** Total frames in a clip of this duration. Rounds, so the last partial frame survives. */
-export function totalFramesFor(durationSeconds, fps) {
-  return Math.round(durationSeconds * fps);
 }
 
 // ==================== MODEL SINGLETON ====================
@@ -286,57 +171,23 @@ export class PoseExtractor {
     const ts = Math.max(timestampMs, this._lastDetectTimestamp + 0.001);
     this._lastDetectTimestamp = ts;
 
-    const result = this.poseLandmarker.detectForVideo(canvas, ts);
+    const detection = this.poseLandmarker.detectForVideo(canvas, ts);
 
-    if (!result.landmarks || result.landmarks.length === 0) {
+    if (!detection.landmarks || detection.landmarks.length === 0) {
       return null;
     }
 
-    const rawLandmarks = result.landmarks[0];
+    const result = computeResult(detection.landmarks[0], videoWidth, videoHeight, timestampMs, {
+      prevCom: this.previousCom,
+      prevTimestampMs: this.previousTimestampMs,
+    });
 
-    // Convert normalized coords to pixel coords and map to our names
-    const landmarks = {};
-    for (const [index, name] of Object.entries(LANDMARK_MAP)) {
-      const lm = rawLandmarks[parseInt(index)];
-      if (lm) {
-        landmarks[name] = {
-          x: lm.x * videoWidth,
-          y: lm.y * videoHeight,
-          z: lm.z,
-          visibility: lm.visibility || 0,
-        };
-      }
-    }
-
-    // Calculate 10 standard angles
-    const angles = {};
-    for (const [angleName, ptA, ptB, ptC] of ANGLE_DEFINITIONS) {
-      if (landmarks[ptA] && landmarks[ptB] && landmarks[ptC]) {
-        angles[angleName] = angleBetween(landmarks[ptA], landmarks[ptB], landmarks[ptC]);
-      } else {
-        angles[angleName] = null;
-      }
-    }
-    // 2 back angles
-    angles['upper_back'] = calculateUpperBack(landmarks);
-    angles['lower_back'] = calculateLowerBack(landmarks);
-
-    // Center of mass speed
-    let comSpeed = 0;
-    if (landmarks['left_hip'] && landmarks['right_hip']) {
-      const com = midpoint(landmarks['left_hip'], landmarks['right_hip']);
-      if (this.previousCom && this.previousTimestampMs !== null) {
-        const dt = (timestampMs - this.previousTimestampMs) / 1000; // seconds
-        if (dt > 0) {
-          comSpeed = distance(com, this.previousCom) / dt;
-        }
-      }
-      this.previousCom = com;
+    if (result?.com) {
+      this.previousCom = result.com;
       this.previousTimestampMs = timestampMs;
-      landmarks._com = com;
     }
 
-    return { landmarks, angles, comSpeed };
+    return result;
   }
 
   /** Abort an in-flight extraction. Safe to call more than once. */
@@ -498,7 +349,7 @@ export class PoseExtractor {
               mediaTime >= duration - 1e-6 ||
               fpsSampleTimes.length > 300
             ) {
-              fps = detectFps(fpsSampleTimes) ?? 30;
+              fps = detectFps(fpsSampleTimes) ?? FALLBACK_FPS;
               if (onState) onState('extracting');
             }
           }
@@ -559,7 +410,7 @@ export class PoseExtractor {
       }
 
       if (fps === null) {
-        fps = detectFps(fpsSampleTimes) ?? 30;
+        fps = detectFps(fpsSampleTimes) ?? FALLBACK_FPS;
       }
 
       const rows = buildRows(samples, fps);
@@ -604,91 +455,18 @@ export class PoseExtractor {
   }
 }
 
-/**
- * Turn captured samples into contiguous CSV rows.
- *
- * Two invariants matter downstream: SkeletonOverlay indexes the parsed CSV by
- * position, so row N must be frame N; and frame numbers must line up with what
- * the player computes from currentTime. So frame_number comes from the
- * presentation time, duplicates are dropped, and any hole is filled with an
- * empty (pose-less) row rather than left as a gap.
- */
-export function buildRows(samples, fps) {
-  const ordered = [...samples].sort((a, b) => a.mediaTime - b.mediaTime);
-
-  const byIndex = new Map();
-  for (const sample of ordered) {
-    const frameNum = frameIndexFor(sample.mediaTime, fps);
-    // First writer wins: the earliest presentation time for this index.
-    if (!byIndex.has(frameNum)) {
-      byIndex.set(frameNum, sample.result);
-    }
-  }
-
-  if (byIndex.size === 0) return [];
-
-  let maxIndex = 0;
-  for (const key of byIndex.keys()) {
-    if (key > maxIndex) maxIndex = key;
-  }
-
-  const rows = [];
-  for (let frameNum = 0; frameNum <= maxIndex; frameNum++) {
-    rows.push({
-      frameNum,
-      // Derived from the index, so timestamp_ms === frame_number / fps exactly.
-      timestampMs: (frameNum / fps) * 1000,
-      result: byIndex.has(frameNum) ? byIndex.get(frameNum) : null,
-    });
-  }
-  return rows;
-}
-
-/** Build the CSV string. Column order and formatting are a fixed contract. */
-export function framesToCSV(frames) {
-  const landmarkNames = Object.values(LANDMARK_MAP);
-
-  // Header
-  const headers = [
-    'frame_number', 'timestamp_ms', 'speed_center_of_mass',
-    ...ANGLE_DEFINITIONS.map(([name]) => `angle_${name}`),
-    'angle_upper_back', 'angle_lower_back',
-  ];
-  for (const name of landmarkNames) {
-    headers.push(`landmark_${name}_x`, `landmark_${name}_y`, `landmark_${name}_z`, `landmark_${name}_visibility`);
-  }
-
-  const rows = [headers.join(',')];
-
-  for (const frame of frames) {
-    const row = [
-      frame.frameNum,
-      frame.timestampMs,
-      frame.result ? frame.result.comSpeed : 0,
-    ];
-
-    // Angles
-    for (const [angleName] of ANGLE_DEFINITIONS) {
-      row.push(frame.result?.angles?.[angleName] ?? '');
-    }
-    row.push(frame.result?.angles?.['upper_back'] ?? '');
-    row.push(frame.result?.angles?.['lower_back'] ?? '');
-
-    // Landmarks
-    for (const name of landmarkNames) {
-      const lm = frame.result?.landmarks?.[name];
-      if (lm) {
-        row.push(lm.x, lm.y, lm.z, lm.visibility);
-      } else {
-        row.push('', '', '', '');
-      }
-    }
-
-    rows.push(row.join(','));
-  }
-
-  return rows.join('\n');
-}
-
-export { LANDMARK_MAP, ANGLE_DEFINITIONS, KNOWN_FPS, MAX_INFERENCE_EDGE, DECODE_UNSUPPORTED_MESSAGE };
+export {
+  LANDMARK_MAP,
+  ANGLE_DEFINITIONS,
+  KNOWN_FPS,
+  MAX_INFERENCE_EDGE,
+  FALLBACK_FPS,
+  DECODE_UNSUPPORTED_MESSAGE,
+  detectFps,
+  frameIndexFor,
+  totalFramesFor,
+  buildRows,
+  framesToCSV,
+  csvHeaders,
+};
 export default PoseExtractor;

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test scripts/test_pose_math.mjs",
+    "make-test-videos": "bash scripts/make_test_video.sh"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",
