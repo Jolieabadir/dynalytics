@@ -1,6 +1,7 @@
 """Labeling module for video data collection."""
 from .models import (
     Video,
+    Hold,
     Move,
     Environment,
     Outcome,
@@ -11,18 +12,20 @@ from .models import (
     WALL_ANGLES,
     HOLD_TYPES,
     HOLD_QUALITIES,
+    HOLD_SLOTS,
+    HOLD_SOURCES,
     RESULTS,
     REACH_DETAILS,
     CONFIDENCE_LEVELS,
     TAG_TYPES,
     SIDES,
-    TRACTION_SOURCES,
     BODY_PARTS,
 )
-from .database import Database
+from .database import Database, SchemaNotApplied, SCHEMA_VERSION
 
 __all__ = [
     'Video',
+    'Hold',
     'Move',
     'Environment',
     'Outcome',
@@ -33,12 +36,15 @@ __all__ = [
     'WALL_ANGLES',
     'HOLD_TYPES',
     'HOLD_QUALITIES',
+    'HOLD_SLOTS',
+    'HOLD_SOURCES',
     'RESULTS',
     'REACH_DETAILS',
     'CONFIDENCE_LEVELS',
     'TAG_TYPES',
     'SIDES',
-    'TRACTION_SOURCES',
     'BODY_PARTS',
     'Database',
+    'SchemaNotApplied',
+    'SCHEMA_VERSION',
 ]

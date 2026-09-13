@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Generated test clips (regenerate with npm run make-test-videos)
+test-videos/
