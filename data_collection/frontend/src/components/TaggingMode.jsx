@@ -7,6 +7,7 @@
  */
 import { useRef, useEffect, useState } from 'react';
 import useStore from '../store/useStore';
+import { fpsOf, timeToFrame, frameToTime, frameToMs } from '../utils/frames';
 import {
   getFrameTags,
   createFrameTag,
@@ -100,7 +101,7 @@ function TaggingMode() {
   const [exporting, setExporting] = useState(false);
   const [configError, setConfigError] = useState(null);
 
-  const fps = currentVideo?.fps || 30;
+  const fps = fpsOf(currentVideo);
 
   // Load config
   useEffect(() => {
@@ -140,7 +141,7 @@ function TaggingMode() {
   // Set initial frame to move start
   useEffect(() => {
     if (currentMove && videoRef.current) {
-      const startTime = currentMove.frame_start / fps;
+      const startTime = frameToTime(currentMove.frame_start, fps);
       videoRef.current.currentTime = startTime;
       setCurrentFrame(currentMove.frame_start);
     }
@@ -152,7 +153,7 @@ function TaggingMode() {
 
     const updateFrame = () => {
       const time = videoRef.current.currentTime;
-      const frame = Math.round(time * fps);
+      const frame = timeToFrame(time, fps);
 
       // Clamp to move boundaries
       if (currentMove) {
@@ -163,7 +164,7 @@ function TaggingMode() {
 
         // If we've gone past the end, loop back
         if (frame > currentMove.frame_end) {
-          videoRef.current.currentTime = currentMove.frame_start / fps;
+          videoRef.current.currentTime = frameToTime(currentMove.frame_start, fps);
         }
 
         setCurrentFrame(clampedFrame);
@@ -185,7 +186,7 @@ function TaggingMode() {
       currentMove.frame_start,
       Math.min(frame, currentMove.frame_end)
     );
-    const time = clampedFrame / fps;
+    const time = frameToTime(clampedFrame, fps);
     videoRef.current.currentTime = time;
     setCurrentFrame(clampedFrame);
   };
@@ -240,7 +241,7 @@ function TaggingMode() {
       const tagData = {
         move_id: currentMove.id,
         frame_number: currentFrame,
-        timestamp_ms: (currentFrame / fps) * 1000,
+        timestamp_ms: frameToMs(currentFrame, fps),
         tag_type: selectedTagType,
         level: intensity,
         locations: selectedLocations,

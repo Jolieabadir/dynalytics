@@ -10,6 +10,7 @@
  */
 import { useState, useEffect } from 'react';
 import useStore from '../store/useStore';
+import { fpsOf, frameToTime, frameToMs } from '../utils/frames';
 import {
   createMove,
   createEnvironment,
@@ -228,15 +229,15 @@ function MoveForm() {
     let createdMove = null;
 
     try {
-      const fps = currentVideo.fps;
+      const fps = fpsOf(currentVideo);
 
       // Step 1: Create the move (Lens 2: Strategy)
       const moveData = {
         video_id: currentVideo.id,
         frame_start: moveStart,
         frame_end: moveEnd,
-        timestamp_start_ms: (moveStart / fps) * 1000,
-        timestamp_end_ms: (moveEnd / fps) * 1000,
+        timestamp_start_ms: frameToMs(moveStart, fps),
+        timestamp_end_ms: frameToMs(moveEnd, fps),
         approach: approach,
         size: size,
         move_tags: moveTags,
@@ -341,9 +342,9 @@ function MoveForm() {
     );
   }
 
-  const fps = currentVideo?.fps || 30;
+  const fps = fpsOf(currentVideo);
   const duration =
-    moveEnd && moveStart ? ((moveEnd - moveStart) / fps).toFixed(2) : 0;
+    moveEnd && moveStart ? frameToTime(moveEnd - moveStart, fps).toFixed(2) : 0;
   const frameCount = moveEnd && moveStart ? moveEnd - moveStart : 0;
 
   return (

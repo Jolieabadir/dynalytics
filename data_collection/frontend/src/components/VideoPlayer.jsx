@@ -5,6 +5,7 @@
  */
 import { useRef, useEffect, useState } from 'react';
 import useStore from '../store/useStore';
+import { fpsOf, timeToFrame, frameToTime } from '../utils/frames';
 import SkeletonOverlay from './SkeletonOverlay';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -31,7 +32,7 @@ function VideoPlayer() {
     clearMoveSelection,
   } = useStore();
 
-  const fps = currentVideo?.fps || 30;
+  const fps = fpsOf(currentVideo);
 
   // Load CSV data when video changes
   // Use store data if available (client-side extraction), otherwise fetch from server
@@ -79,8 +80,8 @@ function VideoPlayer() {
     if (!videoRef.current) return;
 
     const updateFrame = () => {
-      const frame = Math.floor(videoRef.current.currentTime * fps);
-      setCurrentFrame(frame);
+      if (!fps) return;
+      setCurrentFrame(timeToFrame(videoRef.current.currentTime, fps));
     };
 
     const video = videoRef.current;
@@ -130,7 +131,7 @@ function VideoPlayer() {
 
   const seekToFrame = (frame) => {
     if (!videoRef.current) return;
-    const time = frame / fps;
+    const time = frameToTime(frame, fps);
     videoRef.current.currentTime = time;
     setCurrentFrame(frame);
   };
@@ -190,7 +191,7 @@ function VideoPlayer() {
 
         <span className="frame-counter">
           Frame: {currentFrame} / {currentVideo.total_frames}
-          {' '}({(currentFrame / fps).toFixed(2)}s)
+          {' '}({frameToTime(currentFrame, fps).toFixed(2)}s)
         </span>
 
         <button 
