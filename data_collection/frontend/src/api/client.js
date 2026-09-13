@@ -5,6 +5,7 @@
  * Updated for three-lens schema: Environment / Strategy / Outcome
  */
 import axios from 'axios';
+import { authHeader, requireAccessToken } from './auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -13,6 +14,13 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// Every /api route except /api/health requires a Supabase bearer token.
+api.interceptors.request.use(async (config) => {
+  if (config.url && config.url.includes('/api/health')) return config;
+  Object.assign(config.headers, await authHeader());
+  return config;
 });
 
 // ==================== CONFIGURATION ====================
@@ -24,16 +32,87 @@ export const getConfig = async () => {
 
 // ==================== VIDEOS ====================
 
-export const uploadVideo = async (file) => {
-  const formData = new FormData();
-  formData.append('file', file);
+/**
+ * Register a client-processed video.
+ *
+ * Retried with exponential backoff: extraction can run for minutes before this
+ * call, so a transient network blip here would throw away all of that work.
+ * Only transport failures and 5xx are retried — a 401 or a 413 will not become
+ * true on a second attempt.
+ *
+ * @param {{filename: string, fps: number, total_frames: number, duration_ms: number, csv_data: string}} payload
+ * @param {{attempts?: number, baseDelayMs?: number, onRetry?: (attempt: number, delayMs: number, err: Error) => void, signal?: AbortSignal}} [options]
+ */
+export const registerVideo = async (payload, options = {}) => {
+  const { attempts = 3, baseDelayMs = 1000, onRetry, signal } = options;
 
-  const response = await api.post('/api/videos/upload', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
+  // Surface a missing session before spending a retry budget on a guaranteed 401.
+  await requireAccessToken();
+
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await api.post('/api/videos/register', payload, { signal });
+      return response.data;
+    } catch (err) {
+      lastError = err;
+
+      const status = err.response?.status;
+      const retriable = status === undefined || status >= 500;
+      if (!retriable || attempt === attempts || signal?.aborted) break;
+
+      // 1s, 2s, 4s with jitter, so parallel clients don't retry in lockstep.
+      const delay = baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random());
+      if (onRetry) onRetry(attempt, delay, err);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  const detail = lastError?.response?.data?.detail;
+  throw new Error(detail || lastError?.message || 'Failed to register video');
+};
+
+/** Presigned PUT URL for uploading the original video straight to R2. */
+export const getUploadUrl = async (videoId, contentType = 'video/mp4') => {
+  const response = await api.post(`/api/videos/${videoId}/upload-url`, {
+    content_type: contentType,
   });
   return response.data;
+};
+
+/**
+ * Upload the original video to R2.
+ *
+ * The Content-Type must match the one the presigned URL was signed with, or R2
+ * rejects the signature. Sent without credentials — the signature is the auth.
+ */
+export const putVideoToR2 = async (url, file, contentType = 'video/mp4') => {
+  const response = await fetch(url, {
+    method: 'PUT',
+    body: file,
+    headers: { 'Content-Type': contentType },
+  });
+  if (!response.ok) {
+    throw new Error(`Video upload failed (${response.status})`);
+  }
+  return response;
+};
+
+/** Record the R2 key once the direct upload has finished. */
+export const confirmUpload = async (videoId, key) => {
+  const response = await api.post(`/api/videos/${videoId}/confirm-upload`, { key });
+  return response.data;
+};
+
+/**
+ * Full original-video upload: presign → PUT to R2 → confirm.
+ * Best-effort by design; the pose CSV is already saved by registerVideo.
+ */
+export const uploadOriginalVideo = async (videoId, file) => {
+  const contentType = file.type || 'video/mp4';
+  const { url, key } = await getUploadUrl(videoId, contentType);
+  await putVideoToR2(url, file, contentType);
+  return confirmUpload(videoId, key);
 };
 
 export const getVideos = async () => {

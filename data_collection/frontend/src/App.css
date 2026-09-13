@@ -321,6 +321,25 @@ body {
   transition: width 0.3s ease;
 }
 
+/* Cancel an in-flight extraction. Deliberately quiet next to the CTA. */
+.cancel-button {
+  margin-top: var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
+  background: transparent;
+  color: var(--text-muted, #888);
+  border: 1px solid var(--primary-soft);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.cancel-button:hover {
+  background: var(--primary-soft);
+  color: var(--text, #333);
+}
+
 .upload-error {
   background: var(--error-soft);
   color: #9b6b6b;
