@@ -375,6 +375,47 @@ is two branches, not three: **merge `feat/supabase-r2-schema-v3` and
 `feat/ux-round-holds` to `main` in one go.** This branch already contains every
 pose-extractor commit through `4046982`.
 
+### Step 0 — apply migrations FIRST, before anything deploys
+
+**This step exists because skipping it broke the first cutover attempt.** The
+code was merged and deployed while `20260913180000_add_video_dimensions.sql`
+had never been pushed to Supabase, so every `POST /api/videos/register`
+returned 500 with `column "width" of relation "videos" does not exist`. Nothing
+else had failed. Apply the schema *before* the code that needs it.
+
+`apply_schema_sql()` is a **test-only** path — it never runs against
+production. Production migrations go through the Supabase CLI.
+
+```bash
+cd data_collection/backend
+
+# The DSN in .env is the TRANSACTION pooler (port 6543), which does not support
+# prepared statements. The CLI fails on it with:
+#     prepared statement "lrupsc_1_0" already exists (SQLSTATE 42P05)
+# The API itself is fine — database.py sets prepare_threshold = None — but the
+# CLI has no such escape. Use the SESSION pooler: same host and credentials,
+# port 5432.
+SESSION_DSN=$(python3 -c "
+import os, urllib.parse as u
+p = u.urlparse(os.environ['DATABASE_URL'])
+print(u.urlunparse(p._replace(netloc=f'{p.username}:{u.quote(p.password, safe=\"\")}@{p.hostname}:5432')))
+")
+
+supabase db push --db-url "$SESSION_DSN" --dry-run   # review what will apply
+supabase db push --db-url "$SESSION_DSN"
+supabase migration list --db-url "$SESSION_DSN"
+```
+
+- [ ] `supabase migration list` shows **every** local migration with a matching
+      Remote entry.
+- [ ] A second `supabase db push --dry-run` reports **"Remote database is up to
+      date."**
+- [ ] **STOP if anything is still pending.** Do not merge, do not deploy.
+
+Note the migration directory only exists on the feature branch until the merge
+lands, so run this from a worktree that has `supabase/migrations/` — not from a
+freshly-checked-out `main`.
+
 ### Before the merge
 
 - [x] ~~Reconcile `holdMatching.js` and `holdAssignment.js`~~ — **done** (§C9). `holdMatching` is the single source of geometry; `holdAssignment` is a thin policy adapter over it.
@@ -383,7 +424,7 @@ pose-extractor commit through `4046982`.
 - [ ] Re-run both suites after the merge to `main` resolves any further conflicts.
 - [ ] Confirm the frontend is complete against the §7 contract: bearer token on every `/api` call, JSON register, three-step presigned upload, four-slot environment, `foot_cut`/`timing`/`dyno_style`/`traction_*` gone, 307s followed. *(Done on this branch — re-verify after the merge resolves conflicts.)*
 - [ ] `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` point at the **new** project `nbqtgknayvsjkevaoeef`. *(Done — §C7.)*
-- [ ] Someone can sign in on the new Supabase project. **It has no users beyond the two `smoke-test-*@dynalytix.test` accounts** — decide whether sign-ups are open, or create the labelers' accounts by hand. Check whether email confirmation is on: if it is, `AuthGate` will say so and nobody gets in until they click the link.
+- [ ] Decide how labelers get accounts. **Email confirmation is ON** in this project (confirmed live during cutover): public sign-up creates the user but leaves it unconfirmed, `AuthGate` says "Check your email for a confirmation link, then sign in", and nobody gets in until they click it. So either the labelers' addresses must actually receive mail, or create and confirm their accounts through the Supabase admin API / dashboard. **Supabase also rejects non-resolvable TLDs on public sign-up** — `@dynalytix.test` is refused with "Email address is invalid"; the admin API bypasses that, which is why the smoke test can use it and a person cannot.
 - [ ] Decide about the old data. Nothing is migrated — schema v3 starts empty by design. Old SQLite labels on the Railway disk are already lost on every redeploy; exports live in the `dynalytix-data` GitHub repo.
 - [ ] Decide on the detector (§C4): accept AGPL-3.0, find a permissive model, or leave it off. **Leaving it off is a complete product** — every hold can be placed by hand.
 

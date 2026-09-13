@@ -322,6 +322,157 @@ separately.
 
 ---
 
+## ✅ Sixth update — CUTOVER COMPLETE (2026-09-13)
+
+v3 is **live**. `main` is deployed to both services and the smoke test passes
+against the real deployment with real R2.
+
+| | |
+|---|---|
+| Backend | https://adorable-integrity-production.up.railway.app |
+| Frontend | https://collect.dynalytix.net |
+| Deployed commit | `62d3330` (tree identical to the merge `3e3cb26`) |
+
+### The first attempt failed — worth recording
+
+The first cutover was rolled back. `POST /api/videos/register` returned 500:
+
+```
+psycopg.errors.UndefinedColumn: column "width" of relation "videos" does not exist
+```
+
+`20260913180000_add_video_dimensions.sql` had been merged into the repo but
+never pushed to Supabase. Production applies migrations with `supabase db push`;
+`apply_schema_sql()` is a **test-only** path and never runs against production.
+Nothing else failed — health, config and the taxonomy were all correct.
+
+Two things this exposed, both now fixed in §9:
+
+1. **The runbook had no "apply migrations" step.** It predated the
+   dimensions migration. It is now step 0, with a hard stop if anything is
+   pending.
+2. **`supabase db push` cannot use `DATABASE_URL` as it is set.** That DSN is
+   the *transaction* pooler (port 6543), which does not support prepared
+   statements, and the CLI fails with
+   `prepared statement "lrupsc_1_0" already exists (SQLSTATE 42P05)`. The API
+   itself is fine — `database.py` sets `prepare_threshold = None` — but the CLI
+   has no such escape. Use the **session** pooler: same host and credentials,
+   **port 5432**. §9 step 0 spells this out.
+
+The failed push applied nothing; `width`/`height` were still absent and the
+migration history was unchanged afterwards.
+
+### Migration state after the fix
+
+```
+   Local          | Remote         | Time (UTC)
+  ----------------|----------------|---------------------
+   20260913023235 | 20260913023235 | 2026-09-13 02:32:35
+   20260913180000 | 20260913180000 | 2026-09-13 18:00:00
+
+Remote database is up to date.
+```
+
+`public.videos` now carries `width integer NULL` and `height integer NULL`.
+`schema_version` is still **3** — the migration is additive and deliberately
+does not bump it, so a v3 reader is unaffected.
+
+### Health, against the deployment
+
+```
+$ curl https://adorable-integrity-production.up.railway.app/api/health
+{"status":"ok","database":"ok","r2":"ok","schema_version":3}
+
+$ curl -o /dev/null -w '%{http_code}' .../api/config
+401          # correct: /api/config requires a bearer token in v3
+```
+
+`r2` reads `ok`, not `not configured` — object storage is real, not stubbed.
+
+### Smoke test output — 35 passed, 0 failed
+
+Run against the deployed URL with real R2 and real ES256 tokens for two
+throwaway users:
+
+```
+Using real Supabase access tokens for two throwaway users
+
+Smoke test against https://adorable-integrity-production.up.railway.app
+
+health
+  PASS  GET /api/health is 200
+  PASS  database reachable
+  PASS  schema version is 3
+  PASS  R2 configured
+
+config
+  PASS  GET /api/config is 200
+  PASS  move_tags contains 'technical'
+  PASS  move_tags contains 'tension'
+  PASS  'timings' key is gone
+  PASS  GET /api/config without a token is 401
+
+register
+  PASS  POST /api/videos/register is 201
+  PASS  pose CSV key recorded
+  PASS  fps round-tripped
+  PASS  total_frames round-tripped
+
+labels
+  PASS  POST /api/holds is 201
+  PASS  POST /api/moves is 201
+  PASS  POST /api/environments is 201
+  PASS  foot slot left empty
+  PASS  POST /api/outcomes is 201
+  PASS  POST /api/frame-tags is 201
+
+export
+  PASS  POST export is 200
+  PASS  export key returned
+  PASS  GET /api/exports/mine is 200
+  PASS  export appears in /api/exports/mine
+  PASS  export download redirects (307)
+  PASS  presigned URL returned
+  PASS  export object fetched from R2
+  PASS  export header carries raw pose columns
+  PASS  export header carries label columns
+  PASS  labels joined onto frames
+
+isolation (second user)
+  PASS  other user GET video is 404
+  PASS  other user GET moves is 404
+  PASS  other user GET move is 404
+  PASS  other user export is 404
+  PASS  other user download is 404
+  PASS  other user's export list excludes it
+
+35 passed, 0 failed
+```
+
+The export section is the one that matters most: it round-trips a real object
+through R2 (presigned PUT, 307 redirect on download, presigned GET) and
+confirms the labels are joined onto the raw pose frames. The isolation section
+confirms a second user gets 404 on every one of the first user's resources.
+
+### After the run
+
+Tables were truncated so the smoke test's rows do not pollute the first real
+session:
+
+```sql
+TRUNCATE frame_tags, outcomes, environments, moves, holds, videos RESTART IDENTITY CASCADE;
+```
+
+### Retired variables
+
+`GITHUB_TOKEN` and `DATA_REPO` were deleted from `adorable-integrity` during the
+first attempt and were **not restored** — the v3 build does not use them, and
+`data_sync.py` no longer runs. Their values were not recorded anywhere and are
+not recoverable from `.env`. If the old build ever needs to run again, both
+must be recreated.
+
+---
+
 ## ⛔ Second update — R2 and Railway are still not available
 
 A follow-up pass was requested on the premise that R2 credentials were in
@@ -839,6 +990,33 @@ deployed container itself, which is held deliberately, not blocked.
 
 R2, Supabase and the Railway variables are all done and verified. What is left
 is one coordinated release.
+
+### Step 0 — apply migrations FIRST (added after the first attempt failed)
+
+**Skipping this broke the first cutover.** The code deployed while
+`20260913180000_add_video_dimensions.sql` had never reached Supabase, so every
+`POST /api/videos/register` returned 500 with
+`column "width" of relation "videos" does not exist`. See the Sixth update above.
+
+`apply_schema_sql()` is **test-only** and never runs against production.
+
+```bash
+cd data_collection/backend
+# DATABASE_URL is the TRANSACTION pooler (6543) and has no prepared-statement
+# support; the CLI dies on it with SQLSTATE 42P05. Use the SESSION pooler, 5432.
+SESSION_DSN=$(python3 -c "
+import os, urllib.parse as u
+p = u.urlparse(os.environ['DATABASE_URL'])
+print(u.urlunparse(p._replace(netloc=f'{p.username}:{u.quote(p.password, safe=\"\")}@{p.hostname}:5432')))
+")
+supabase db push --db-url "$SESSION_DSN" --dry-run
+supabase db push --db-url "$SESSION_DSN"
+supabase migration list --db-url "$SESSION_DSN"
+```
+
+**STOP if `migration list` shows any local migration without a matching Remote
+entry, or if a second `--dry-run` does not say "Remote database is up to date."**
+Run it from a worktree that actually has `supabase/migrations/`.
 
 ### The one thing that governs everything
 
