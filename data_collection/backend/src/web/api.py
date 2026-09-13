@@ -24,6 +24,7 @@ from ..labeling.models import (
     WALL_ANGLES, HOLD_TYPES, HOLD_QUALITIES, HOLD_SLOTS, HOLD_SOURCES,
     RESULTS, REACH_DETAILS, CONFIDENCE_LEVELS,
     TAG_TYPES, BODY_PARTS, SIDES,
+    DEFINITIONS,
 )
 from ..labeling.exporter import Exporter
 from ..storage import r2
@@ -331,6 +332,9 @@ class ConfigResponse(BaseModel):
     tag_types: dict
     body_parts: List[str]
     sides: List[str]
+    # Plain-language definitions for every option above, and optional
+    # display_label overrides. {taxonomy_key: {value: {description, display_label?}}}
+    definitions: dict
 
 
 class ExportResponse(BaseModel):
@@ -571,6 +575,8 @@ async def get_config(user_id: str = Depends(get_current_user_id)):
         tag_types=TAG_TYPES,
         body_parts=BODY_PARTS,
         sides=SIDES,
+        # Definitions rendered as an "i" tooltip beside each option.
+        definitions=DEFINITIONS,
     )
 
 

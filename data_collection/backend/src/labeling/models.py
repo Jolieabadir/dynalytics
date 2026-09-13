@@ -333,3 +333,261 @@ BODY_PARTS = [
     'lower_back', 'upper_back',
     'core', 'forearms',
 ]
+
+
+# =============================================================================
+# DEFINITIONS
+# =============================================================================
+#
+# Plain climber-facing wording for every option the labeling UI renders, so a
+# first-time labeler never has to guess what a value means. Served by
+# /api/config as `definitions` and shown as an "i" tooltip beside each option.
+#
+# Shape: {taxonomy_key: {value: {"description": str, "display_label": str?}}}
+#
+# `description` is required on every option. `display_label` is optional and
+# overrides the label the UI would otherwise derive from the value — it exists
+# so wording can be changed without touching a stored enum value (see
+# REACH_DETAILS, where the wording is still being settled).
+#
+# These are additive: the flat taxonomy lists above remain the source of truth
+# for validation, and a value missing from this map still renders, just with no
+# tooltip.
+
+DEFINITIONS = {
+    # --- Lens 2: Strategy ---
+    'approaches': {
+        'static': {
+            'description': 'Controlled throughout. The climber could stop and hold '
+                           'still at any point in the move.',
+        },
+        'dynamic': {
+            'description': 'Uses momentum. There is a point where the climber is '
+                           'committed and could not stop halfway.',
+        },
+        'coordination': {
+            'description': 'Several body parts have to move in a specific order or '
+                           'rhythm for the move to work at all.',
+        },
+    },
+    'sizes': {
+        'small': {
+            'description': 'A short movement — roughly a forearm\'s length or less. '
+                           'Adjusting, matching, or a small bump.',
+        },
+        'medium': {
+            'description': 'A normal reach. The climber moves about an arm\'s length '
+                           'without fully extending.',
+        },
+        'large': {
+            'description': 'A long movement — full extension, or a jump. The climber '
+                           'covers as much distance as they can.',
+        },
+    },
+    'move_tags': {
+        'bump': {
+            'description': 'Moving a hand to an intermediate hold, then straight on '
+                           'to the real target without settling.',
+        },
+        'mantle': {
+            'description': 'Pressing down on a hold to push the body up over it, '
+                           'like climbing out of a swimming pool.',
+        },
+        'balance': {
+            'description': 'Staying on depends on body position rather than on '
+                           'pulling hard.',
+        },
+        'upper_body_coordination': {
+            'description': 'The arms and torso have to time together — for example '
+                           'both hands moving in sequence during one motion.',
+        },
+        'lower_body_coordination': {
+            'description': 'The legs and hips have to time together — for example a '
+                           'foot swap or a rockover driven from below.',
+        },
+        'heel_hook': {
+            'description': 'The heel is placed on a hold and pulled with, so the leg '
+                           'works like a third arm.',
+        },
+        'toe_hook': {
+            'description': 'The top of the foot pulls against a hold or volume to '
+                           'stop the body swinging out.',
+        },
+        'no_feet_on': {
+            'description': 'Both feet are off the wall for some part of the move, '
+                           'while at least one hand stays on.',
+        },
+        'deadpoint': {
+            'description': 'A dynamic reach caught at the weightless top of the '
+                           'motion. At least one hand stays on the wall throughout.',
+        },
+        'dyno': {
+            'description': 'A jump. Every point of contact leaves the wall at the '
+                           'same time.',
+        },
+        'foot_move': {
+            'description': 'The hands stay where they are; the move is all in the '
+                           'feet.',
+        },
+        'no_hands': {
+            'description': 'The hands are entirely off the wall — the climber is '
+                           'held on by feet and body position alone.',
+        },
+        'technical': {
+            'description': 'Succeeds on precision rather than power. Getting it '
+                           'slightly wrong makes it much harder.',
+        },
+        'tension': {
+            'description': 'Demands core and body tension to keep the hips in and '
+                           'the feet from cutting.',
+        },
+    },
+    # --- Lens 1: Environment ---
+    'wall_angles': {
+        'slab': {
+            'description': 'Leans away from the climber — less than vertical. Weight '
+                           'sits mostly on the feet.',
+        },
+        'vertical': {
+            'description': 'Straight up and down, near 90°.',
+        },
+        'gentle_overhang': {
+            'description': 'Leans over the climber slightly. Noticeably steeper than '
+                           'vertical but not roof-like.',
+        },
+        'steep': {
+            'description': 'Leans well over the climber. Body tension is needed just '
+                           'to keep the feet on.',
+        },
+    },
+    'hold_types': {
+        'horizontal_edge': {
+            'description': 'A flat edge gripped from above with the fingers, pulling '
+                           'straight down.',
+        },
+        'gaston': {
+            'description': 'A vertical hold pulled outward with the thumb down and '
+                           'the elbow out, like opening a sliding door.',
+        },
+        'side_pull': {
+            'description': 'A vertical hold pulled sideways toward the body, with '
+                           'the thumb up.',
+        },
+        'undercling': {
+            'description': 'A hold gripped from underneath, palm up, pulling up '
+                           'into it.',
+        },
+        'jug': {
+            'description': 'A big, obvious hold the whole hand fits into. Easy to '
+                           'hang from.',
+        },
+        'pinch': {
+            'description': 'Squeezed between the thumb on one side and the fingers '
+                           'on the other.',
+        },
+    },
+    'hold_qualities': {
+        'incut': {
+            'description': 'The gripping surface curves back in toward the wall, so '
+                           'the fingers get a positive lip to pull on.',
+        },
+        'sloped': {
+            'description': 'The surface rounds away with no positive edge. Held by '
+                           'friction and body position.',
+        },
+        'small': {
+            'description': 'Little room for the fingers — a pad or two at most.',
+        },
+    },
+    'hold_slots': {
+        'start_left': {
+            'description': 'The hold the left hand is on when the move begins.',
+        },
+        'start_right': {
+            'description': 'The hold the right hand is on when the move begins.',
+        },
+        'end': {
+            'description': 'The hold the climber is moving to — what the reaching '
+                           'hand is aiming for.',
+        },
+        'foot': {
+            'description': 'The main foothold the move is driven from. Optional — '
+                           'leave empty if no single foot matters.',
+        },
+    },
+    # --- Lens 3: Outcome ---
+    'results': {
+        'success': {
+            'description': 'The climber finished the move and stayed on the wall.',
+        },
+        'fall': {
+            'description': 'The climber came off the wall during or at the end of '
+                           'this move.',
+        },
+    },
+    # Wording here is still being settled with Taylor. The stored values are
+    # fixed; `display_label` is what the UI shows, so the wording can change
+    # without a schema migration or a rewrite of existing rows.
+    'reach_details': {
+        'reached_controlled': {
+            'display_label': 'Reached it — in control',
+            'description': 'Got the target hold and was immediately stable on it, '
+                           'ready to move again.',
+        },
+        'reached_not_controlled': {
+            'display_label': 'Reached it — not in control',
+            'description': 'Touched or caught the target hold but was off balance, '
+                           'swinging, or barely holding on.',
+        },
+        'didnt_reach': {
+            'display_label': 'Did not reach it',
+            'description': 'Never made contact with the target hold.',
+        },
+    },
+    'confidence_levels': {
+        'low': {
+            'description': 'You are unsure about the labels you just gave — the '
+                           'camera angle, the speed, or the taxonomy made it a guess.',
+        },
+        'med': {
+            'description': 'You are reasonably sure about the labels, with some '
+                           'doubt on one or two fields.',
+        },
+        'high': {
+            'description': 'You are confident the labels describe what happened.',
+        },
+    },
+    # --- Sensation (Frame Tags) ---
+    'tag_types': {
+        'sharp_pain': {
+            'description': 'A sudden, stabbing pain at a specific spot. Worth '
+                           'stopping for.',
+        },
+        'dull_pain': {
+            'description': 'A duller, spread-out ache rather than a sharp point.',
+        },
+        'audible_pop': {
+            'description': 'A pop, click, or snap that could be heard or felt.',
+        },
+        'unstable': {
+            'description': 'The joint or body position felt like it could give way.',
+        },
+        'stretch': {
+            'description': 'A strong stretching sensation at the end of the range '
+                           'of motion.',
+        },
+        'strong': {
+            'description': 'The position felt powerful and solid — more in reserve.',
+        },
+        'weak': {
+            'description': 'The position felt underpowered — not enough strength in '
+                           'that direction.',
+        },
+        'pumped': {
+            'description': 'Forearms burning and swelling from sustained gripping.',
+        },
+        'fatigue': {
+            'description': 'General tiredness across the body, not localized.',
+        },
+    },
+}
