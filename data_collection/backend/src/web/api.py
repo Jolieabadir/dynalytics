@@ -33,6 +33,10 @@ from .auth import get_current_user_id
 # Largest body accepted on register, which carries the pose CSV inline.
 MAX_REGISTER_BYTES = 60 * 1024 * 1024
 
+# Most holds accepted in one bulk create. A bouldering wall in frame is tens of
+# holds; anything past this is a runaway detector, not a real wall.
+MAX_HOLDS_PER_REQUEST = 200
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Close the connection pool on shutdown, if this module opened it."""
@@ -143,6 +147,15 @@ class ConfirmUploadRequest(BaseModel):
 
 # --- Hold Schemas ---
 
+class HoldItem(BaseModel):
+    """One bounding box in a bulk hold create. video_id comes from the path."""
+    bbox_x: float = Field(ge=0, le=1)
+    bbox_y: float = Field(ge=0, le=1)
+    bbox_w: float = Field(ge=0, le=1)
+    bbox_h: float = Field(ge=0, le=1)
+    source: str = 'manual'  # detected | manual
+
+
 class HoldCreate(BaseModel):
     """Schema for creating a hold."""
     video_id: int
@@ -151,6 +164,20 @@ class HoldCreate(BaseModel):
     bbox_w: float = Field(ge=0, le=1)
     bbox_h: float = Field(ge=0, le=1)
     source: str = 'manual'  # detected | manual
+
+
+class HoldBulkCreate(BaseModel):
+    """Schema for creating many holds on one video in a single request."""
+    holds: List[HoldItem] = []
+
+
+class HoldUpdate(BaseModel):
+    """Schema for updating a hold. Every field optional; omitted fields stay."""
+    bbox_x: Optional[float] = Field(default=None, ge=0, le=1)
+    bbox_y: Optional[float] = Field(default=None, ge=0, le=1)
+    bbox_w: Optional[float] = Field(default=None, ge=0, le=1)
+    bbox_h: Optional[float] = Field(default=None, ge=0, le=1)
+    source: Optional[str] = None
 
 
 class HoldResponse(BaseModel):
@@ -778,6 +805,86 @@ async def list_holds(video_id: int, user_id: str = Depends(get_current_user_id))
     """Get all holds marked on a video."""
     _require_video(video_id, user_id)
     return [hold_to_response(h) for h in get_db().get_holds_for_video(video_id, user_id)]
+
+
+@app.post(
+    "/api/videos/{video_id}/holds",
+    response_model=List[HoldResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_holds_bulk(
+    video_id: int,
+    payload: HoldBulkCreate,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Mark many holds on a video at once.
+
+    This is what the in-browser detector posts after it runs on the first
+    frame: one request for the whole wall, in one transaction, so a failure
+    part-way through leaves no holds rather than a partial set.
+    """
+    # Shape checks first: a runaway payload is rejected without a DB round trip.
+    if len(payload.holds) > MAX_HOLDS_PER_REQUEST:
+        raise _bad_request(
+            f'Too many holds in one request: {len(payload.holds)}. '
+            f'Maximum is {MAX_HOLDS_PER_REQUEST}.'
+        )
+    for hold in payload.holds:
+        if hold.source not in HOLD_SOURCES:
+            raise _bad_request(
+                f"Invalid source: {hold.source}. Must be one of: {HOLD_SOURCES}"
+            )
+
+    _require_video(video_id, user_id)
+
+    if not payload.holds:
+        return []
+
+    now = datetime.now(timezone.utc)
+    holds = [
+        Hold(
+            video_id=video_id,
+            user_id=user_id,
+            bbox_x=h.bbox_x,
+            bbox_y=h.bbox_y,
+            bbox_w=h.bbox_w,
+            bbox_h=h.bbox_h,
+            source=h.source,
+            created_at=now,
+        )
+        for h in payload.holds
+    ]
+
+    ids = get_db().create_holds_bulk(holds)
+    for hold, hold_id in zip(holds, ids):
+        hold.id = hold_id
+    return [hold_to_response(h) for h in holds]
+
+
+@app.put("/api/holds/{hold_id}", response_model=HoldResponse)
+async def update_hold(
+    hold_id: int,
+    payload: HoldUpdate,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Move or resize a hold, or change whether it is detected or manual."""
+    if payload.source is not None and payload.source not in HOLD_SOURCES:
+        raise _bad_request(
+            f"Invalid source: {payload.source}. Must be one of: {HOLD_SOURCES}"
+        )
+
+    updated = get_db().update_hold(
+        hold_id,
+        user_id,
+        bbox_x=payload.bbox_x,
+        bbox_y=payload.bbox_y,
+        bbox_w=payload.bbox_w,
+        bbox_h=payload.bbox_h,
+        source=payload.source,
+    )
+    if updated is None:
+        raise _not_found(f"Hold {hold_id} not found")
+    return hold_to_response(updated)
 
 
 @app.delete("/api/holds/{hold_id}", status_code=status.HTTP_204_NO_CONTENT)

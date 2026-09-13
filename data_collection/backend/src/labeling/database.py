@@ -264,6 +264,54 @@ class Database:
             ))
             return cursor.fetchone()['id']
 
+    def create_holds_bulk(self, holds: List[Hold]) -> List[int]:
+        """Create many holds in one transaction. Returns the new ids, in order.
+
+        The detector posts a whole frame's worth of boxes at once. Doing that
+        in a single transaction means a partial failure leaves no holds behind
+        rather than half a wall.
+        """
+        if not holds:
+            return []
+
+        now = datetime.now(timezone.utc)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            ids = []
+            for hold in holds:
+                cursor.execute(
+                    'INSERT INTO holds ('
+                    ' video_id, user_id, bbox_x, bbox_y, bbox_w, bbox_h, source, created_at'
+                    ') VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+                    (
+                        hold.video_id, hold.user_id, hold.bbox_x, hold.bbox_y,
+                        hold.bbox_w, hold.bbox_h, hold.source, hold.created_at or now,
+                    )
+                )
+                ids.append(cursor.fetchone()['id'])
+            return ids
+
+    def update_hold(self, hold_id: int, user_id: str, **fields) -> Optional[Hold]:
+        """Update one of this user's holds. Returns the updated hold, or None.
+
+        Only the box and the source can move. video_id and user_id are fixed at
+        creation, so a hold can never be re-pointed at another user's video.
+        """
+        allowed = ('bbox_x', 'bbox_y', 'bbox_w', 'bbox_h', 'source')
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return self.get_hold(hold_id, user_id)
+
+        assignments = ', '.join(f'{k} = %s' for k in updates)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'UPDATE holds SET {assignments} WHERE id = %s AND user_id = %s RETURNING *',
+                (*updates.values(), hold_id, user_id)
+            )
+            row = cursor.fetchone()
+            return self._row_to_hold(row) if row else None
+
     def get_hold(self, hold_id: int, user_id: str) -> Optional[Hold]:
         """Get one of this user's holds by ID."""
         with self.get_connection() as conn:
