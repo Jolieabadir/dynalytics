@@ -29,7 +29,10 @@ import {
   computeResult,
   LANDMARK_MAP,
   ANGLE_DEFINITIONS,
+  CSV_LANDMARK_ORDER,
+  LEGACY_LANDMARK_ORDER,
 } from '../src/services/poseMath.js';
+import { goldenFrames } from './golden_frames.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const loadFixture = (name) =>
@@ -220,7 +223,7 @@ test('buildRows on no samples yields no rows', () => {
 
 // ==================== CSV CONTRACT ====================
 
-const EXPECTED_HEADER =
+const LEGACY_HEADER_75 =
   'frame_number,timestamp_ms,speed_center_of_mass,angle_left_elbow,angle_right_elbow,' +
   'angle_left_shoulder,angle_right_shoulder,angle_left_hip,angle_right_hip,angle_left_knee,' +
   'angle_right_knee,angle_left_ankle,angle_right_ankle,angle_upper_back,angle_lower_back,' +
@@ -240,16 +243,74 @@ const EXPECTED_HEADER =
   'landmark_left_heel_x,landmark_left_heel_y,landmark_left_heel_z,landmark_left_heel_visibility,' +
   'landmark_right_heel_x,landmark_right_heel_y,landmark_right_heel_z,landmark_right_heel_visibility';
 
-test('the header is byte-identical to the shipped contract', () => {
+/** The 18 landmarks added by the widening, appended after the original 15. */
+const NEW_LANDMARKS_18 = [
+  'left_eye_inner', 'left_eye', 'left_eye_outer',
+  'right_eye_inner', 'right_eye', 'right_eye_outer',
+  'left_ear', 'right_ear', 'mouth_left', 'mouth_right',
+  'left_pinky', 'right_pinky', 'left_index', 'right_index',
+  'left_thumb', 'right_thumb', 'left_foot_index', 'right_foot_index',
+];
+
+const EXPECTED_HEADER =
+  LEGACY_HEADER_75 +
+  ',' +
+  NEW_LANDMARKS_18.flatMap((n) => [
+    `landmark_${n}_x`, `landmark_${n}_y`, `landmark_${n}_z`, `landmark_${n}_visibility`,
+  ]).join(',');
+
+test('the header is byte-identical to the contract', () => {
   assert.equal(csvHeaders().join(','), EXPECTED_HEADER);
-  assert.equal(csvHeaders().length, 75);
+  assert.equal(csvHeaders().length, 147);
 });
 
-test('every row carries exactly 75 fields', () => {
+test('the first 75 columns are exactly the pre-widening contract', () => {
+  // The widening must be purely additive. If this fails, a positional reader
+  // of the old format silently starts reading the wrong column.
+  assert.equal(csvHeaders().slice(0, 75).join(','), LEGACY_HEADER_75);
+});
+
+test('all 33 MediaPipe landmarks are present, under canonical names', () => {
+  assert.equal(Object.keys(LANDMARK_MAP).length, 33);
+  assert.equal(CSV_LANDMARK_ORDER.length, 33);
+  assert.equal(new Set(CSV_LANDMARK_ORDER).size, 33, 'duplicate landmark name');
+
+  // MediaPipe's own ordering, index 0..32.
+  const canonical = [
+    'nose', 'left_eye_inner', 'left_eye', 'left_eye_outer',
+    'right_eye_inner', 'right_eye', 'right_eye_outer',
+    'left_ear', 'right_ear', 'mouth_left', 'mouth_right',
+    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist', 'left_pinky', 'right_pinky',
+    'left_index', 'right_index', 'left_thumb', 'right_thumb',
+    'left_hip', 'right_hip', 'left_knee', 'right_knee',
+    'left_ankle', 'right_ankle', 'left_heel', 'right_heel',
+    'left_foot_index', 'right_foot_index',
+  ];
+  for (let i = 0; i < 33; i++) {
+    assert.equal(LANDMARK_MAP[i], canonical[i], `index ${i} has the wrong name`);
+  }
+  // Every canonical name has a column.
+  assert.deepEqual([...CSV_LANDMARK_ORDER].sort(), [...canonical].sort());
+});
+
+test('the original 15 landmarks keep their exact column names', () => {
+  for (const name of LEGACY_LANDMARK_ORDER) {
+    for (const axis of ['x', 'y', 'z', 'visibility']) {
+      assert.ok(
+        csvHeaders().includes(`landmark_${name}_${axis}`),
+        `lost column landmark_${name}_${axis}`
+      );
+    }
+  }
+  assert.deepEqual(CSV_LANDMARK_ORDER.slice(0, 15), LEGACY_LANDMARK_ORDER);
+});
+
+test('every row carries exactly 147 fields', () => {
   const rows = buildRows(samplesFrom(fixture30.mediaTimes.slice(0, 20)), 30);
   const lines = framesToCSV(rows).split('\n');
   for (const [i, line] of lines.entries()) {
-    assert.equal(line.split(',').length, 75, `line ${i} has the wrong field count`);
+    assert.equal(line.split(',').length, 147, `line ${i} has the wrong field count`);
   }
 });
 
@@ -260,7 +321,7 @@ test('a pose-less frame is encoded as zero speed and empty columns', () => {
   assert.equal(fields[0], '7');
   assert.equal(fields[1], '233.33');
   assert.equal(fields[2], '0', 'speed should be 0, not empty');
-  for (let i = 3; i < 75; i++) {
+  for (let i = 3; i < 147; i++) {
     assert.equal(fields[i], '', `column ${i} should be empty`);
   }
 });
@@ -321,4 +382,89 @@ test('a 60fps clip read as 30fps loses half the frames — the original bug', ()
 
   assert.equal(correct.length, 600);
   assert.equal(wrong.length, 300, 'reading 60fps as 30 should halve the rows');
+});
+
+// ==================== GOLDEN FILE ====================
+
+const GOLDEN_PATH = join(HERE, 'fixtures', 'golden_pose.csv');
+const golden = readFileSync(GOLDEN_PATH, 'utf8');
+
+test('framesToCSV output is byte-identical to the golden file', () => {
+  // The whole contract in one assertion. Any change to column order, column
+  // names, number formatting or empty-value encoding breaks this.
+  // Regenerate deliberately with `npm run make-golden`, and read the diff.
+  const produced = framesToCSV(goldenFrames());
+  if (produced !== golden) {
+    const a = golden.split('\n');
+    const b = produced.split('\n');
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if (a[i] !== b[i]) {
+        assert.fail(
+          `golden mismatch at line ${i}\n` +
+            `  golden:   ${String(a[i]).slice(0, 160)}\n` +
+            `  produced: ${String(b[i]).slice(0, 160)}`
+        );
+      }
+    }
+  }
+  assert.equal(produced, golden);
+});
+
+test('the golden file has the shape the contract describes', () => {
+  const lines = golden.split('\n');
+  assert.equal(lines[0], EXPECTED_HEADER, 'golden header drifted from the contract');
+  assert.equal(lines.length, 41, 'expected 40 rows plus a header');
+  for (const [i, line] of lines.entries()) {
+    assert.equal(line.split(',').length, 147, `golden line ${i} has the wrong width`);
+  }
+  assert.ok(!golden.endsWith('\n'), 'golden file should have no trailing newline');
+});
+
+test('the golden file covers the awkward cases, not just the happy path', () => {
+  const rows = golden.split('\n').slice(1).map((l) => l.split(','));
+
+  const poseless = rows.filter((r) => r.slice(3).every((f) => f === ''));
+  assert.ok(poseless.length >= 3, 'expected some frames with no pose at all');
+
+  const partial = rows.filter((r) => {
+    const tail = r.slice(3);
+    return tail.some((f) => f === '') && tail.some((f) => f !== '');
+  });
+  assert.ok(partial.length >= 1, 'expected a frame with only some landmarks missing');
+
+  assert.ok(
+    rows.some((r) => Number(r[2]) > 0),
+    'expected a non-zero centre-of-mass speed somewhere'
+  );
+  assert.equal(rows[0][2], '0', 'the first frame has no previous frame, so speed is 0');
+});
+
+test('the golden file still satisfies the frame and timestamp invariants', () => {
+  // The widening must not have disturbed the frame/timestamp math.
+  const rows = golden.split('\n').slice(1).map((l) => l.split(','));
+  const fps = 60;
+
+  rows.forEach((r, i) => {
+    assert.equal(Number(r[0]), i, `frame_number should be ${i}`);
+    const expectedMs = (i / fps) * 1000;
+    assert.ok(
+      Math.abs(Number(r[1]) - expectedMs) < 1,
+      `frame ${i}: timestamp ${r[1]} vs ${expectedMs}`
+    );
+  });
+});
+
+test('the golden file preserves the pre-widening columns verbatim', () => {
+  // Slicing each golden row to its first 75 fields must reproduce exactly what
+  // the 15-landmark format produced for the same frames. This is the promise
+  // to anything already consuming the old CSV.
+  const legacyOnly = framesToCSV(goldenFrames()).split('\n')
+    .map((line) => line.split(',').slice(0, 75).join(','));
+
+  assert.equal(legacyOnly[0], LEGACY_HEADER_75);
+
+  const goldenPrefix = golden.split('\n')
+    .map((line) => line.split(',').slice(0, 75).join(','));
+
+  assert.deepEqual(legacyOnly, goldenPrefix);
 });

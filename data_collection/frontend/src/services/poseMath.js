@@ -7,15 +7,36 @@
  * because these are exactly the parts that were silently wrong before.
  */
 
-// MediaPipe landmark indices we care about (maps to our landmark names)
+/**
+ * All 33 MediaPipe Pose landmarks, index → canonical name.
+ *
+ * Names are MediaPipe's own, which is why the 15 that were already emitted keep
+ * exactly the column names they had: they were canonical to begin with.
+ */
 export const LANDMARK_MAP = {
   0: 'nose',
+  1: 'left_eye_inner',
+  2: 'left_eye',
+  3: 'left_eye_outer',
+  4: 'right_eye_inner',
+  5: 'right_eye',
+  6: 'right_eye_outer',
+  7: 'left_ear',
+  8: 'right_ear',
+  9: 'mouth_left',
+  10: 'mouth_right',
   11: 'left_shoulder',
   12: 'right_shoulder',
   13: 'left_elbow',
   14: 'right_elbow',
   15: 'left_wrist',
   16: 'right_wrist',
+  17: 'left_pinky',
+  18: 'right_pinky',
+  19: 'left_index',
+  20: 'right_index',
+  21: 'left_thumb',
+  22: 'right_thumb',
   23: 'left_hip',
   24: 'right_hip',
   25: 'left_knee',
@@ -24,7 +45,44 @@ export const LANDMARK_MAP = {
   28: 'right_ankle',
   29: 'left_heel',
   30: 'right_heel',
+  31: 'left_foot_index',
+  32: 'right_foot_index',
 };
+
+/** The 15 landmarks emitted before the widening, in their original column order. */
+export const LEGACY_LANDMARK_ORDER = [
+  'nose',
+  'left_shoulder',
+  'right_shoulder',
+  'left_elbow',
+  'right_elbow',
+  'left_wrist',
+  'right_wrist',
+  'left_hip',
+  'right_hip',
+  'left_knee',
+  'right_knee',
+  'left_ankle',
+  'right_ankle',
+  'left_heel',
+  'right_heel',
+];
+
+/**
+ * Landmark column order: the original 15 first, then the 18 new ones in
+ * MediaPipe index order.
+ *
+ * Deliberately NOT canonical index order for the whole set. Emitting 0..32 in
+ * order would push left_shoulder from column 19 to column 23 and shift every
+ * column after it. Appending instead makes the change purely additive: the
+ * first 75 columns are byte-for-byte what they were, so a positional reader
+ * keeps working and a name-based reader (SkeletonOverlay, the backend
+ * exporter's DictReader) is unaffected either way.
+ */
+export const CSV_LANDMARK_ORDER = [
+  ...LEGACY_LANDMARK_ORDER,
+  ...Object.values(LANDMARK_MAP).filter((name) => !LEGACY_LANDMARK_ORDER.includes(name)),
+];
 
 // Angle definitions: [name, pointA, pointB (vertex), pointC]
 export const ANGLE_DEFINITIONS = [
@@ -249,9 +307,9 @@ export function buildRows(samples, fps) {
   return rows;
 }
 
-/** The 75-column header. Order is a fixed contract. */
+/** The 147-column header. Order is a fixed contract. */
 export function csvHeaders() {
-  const landmarkNames = Object.values(LANDMARK_MAP);
+  const landmarkNames = CSV_LANDMARK_ORDER;
   const headers = [
     'frame_number', 'timestamp_ms', 'speed_center_of_mass',
     ...ANGLE_DEFINITIONS.map(([name]) => `angle_${name}`),
@@ -265,7 +323,7 @@ export function csvHeaders() {
 
 /** Build the CSV string. Column order and value formatting are a fixed contract. */
 export function framesToCSV(frames) {
-  const landmarkNames = Object.values(LANDMARK_MAP);
+  const landmarkNames = CSV_LANDMARK_ORDER;
   const rows = [csvHeaders().join(',')];
 
   for (const frame of frames) {

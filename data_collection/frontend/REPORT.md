@@ -75,15 +75,17 @@ precisely the invariant step 5 verifies.
 
 ### 1.4 The CSV column contract — recorded exactly
 
-⚠️ **The contract differs from the one named in the task.** The task described
-"33 landmarks x/y/z/visibility, 10 joint angles". The code emits **15 landmarks and 12
-angles**, and the first two columns are `frame_number`/`timestamp_ms`, not
-`frame_index`/`timestamp`. The **shipped format below is authoritative** and is what this
-branch keeps byte-identical, since changing it would break `SkeletonOverlay`'s positional
-indexing and the backend's stored CSVs. Flagging it in case the 33-landmark shape was the
-actual intent — that would be a deliberate, separate migration.
+> **Updated by the landmark widening — see §9.** The contract is now **147 columns /
+> 33 landmarks**. This section describes the *current* format; the original 15-landmark,
+> 75-column layout is preserved verbatim as the first 75 columns, so everything below
+> about column 75 is additive. §9 covers what changed and why.
 
-**75 columns**, in this order:
+When this branch started, the code emitted **15 landmarks and 12 angles** — not the
+"33 landmarks, 10 joint angles" the original brief named. That gap is what §9 closes.
+The angle count stays at **12**: the brief's "10" omitted `angle_upper_back` and
+`angle_lower_back`, which the code has always emitted.
+
+**147 columns**, in this order:
 
 1. `frame_number` — integer, from 0
 2. `timestamp_ms` — float, milliseconds
@@ -93,15 +95,23 @@ actual intent — that would be a deliberate, separate migration.
    `angle_left_elbow`, `angle_right_elbow`, `angle_left_shoulder`, `angle_right_shoulder`,
    `angle_left_hip`, `angle_right_hip`, `angle_left_knee`, `angle_right_knee`,
    `angle_left_ankle`, `angle_right_ankle`, `angle_upper_back`, `angle_lower_back`
-5. **15 landmarks × 4 fields** = 60 columns, `landmark_<name>_{x,y,z,visibility}` in this
-   landmark order: `nose`, `left_shoulder`, `right_shoulder`, `left_elbow`, `right_elbow`,
-   `left_wrist`, `right_wrist`, `left_hip`, `right_hip`, `left_knee`, `right_knee`,
-   `left_ankle`, `right_ankle`, `left_heel`, `right_heel`
+5. **33 landmarks × 4 fields** = 132 columns, `landmark_<name>_{x,y,z,visibility}`.
+   Names are MediaPipe's canonical ones. The order is **the original 15 first**, then the
+   18 added ones — *not* MediaPipe index order (§9 explains why).
+
+   **Original 15** (columns 16–75, unchanged): `nose`, `left_shoulder`, `right_shoulder`,
+   `left_elbow`, `right_elbow`, `left_wrist`, `right_wrist`, `left_hip`, `right_hip`,
+   `left_knee`, `right_knee`, `left_ankle`, `right_ankle`, `left_heel`, `right_heel`
+
+   **Added 18** (columns 76–147), in MediaPipe index order: `left_eye_inner`, `left_eye`,
+   `left_eye_outer`, `right_eye_inner`, `right_eye`, `right_eye_outer`, `left_ear`,
+   `right_ear`, `mouth_left`, `mouth_right`, `left_pinky`, `right_pinky`, `left_index`,
+   `right_index`, `left_thumb`, `right_thumb`, `left_foot_index`, `right_foot_index`
 
 Header line, verbatim:
 
 ```
-frame_number,timestamp_ms,speed_center_of_mass,angle_left_elbow,angle_right_elbow,angle_left_shoulder,angle_right_shoulder,angle_left_hip,angle_right_hip,angle_left_knee,angle_right_knee,angle_left_ankle,angle_right_ankle,angle_upper_back,angle_lower_back,landmark_nose_x,landmark_nose_y,landmark_nose_z,landmark_nose_visibility,landmark_left_shoulder_x,landmark_left_shoulder_y,landmark_left_shoulder_z,landmark_left_shoulder_visibility,landmark_right_shoulder_x,landmark_right_shoulder_y,landmark_right_shoulder_z,landmark_right_shoulder_visibility,landmark_left_elbow_x,landmark_left_elbow_y,landmark_left_elbow_z,landmark_left_elbow_visibility,landmark_right_elbow_x,landmark_right_elbow_y,landmark_right_elbow_z,landmark_right_elbow_visibility,landmark_left_wrist_x,landmark_left_wrist_y,landmark_left_wrist_z,landmark_left_wrist_visibility,landmark_right_wrist_x,landmark_right_wrist_y,landmark_right_wrist_z,landmark_right_wrist_visibility,landmark_left_hip_x,landmark_left_hip_y,landmark_left_hip_z,landmark_left_hip_visibility,landmark_right_hip_x,landmark_right_hip_y,landmark_right_hip_z,landmark_right_hip_visibility,landmark_left_knee_x,landmark_left_knee_y,landmark_left_knee_z,landmark_left_knee_visibility,landmark_right_knee_x,landmark_right_knee_y,landmark_right_knee_z,landmark_right_knee_visibility,landmark_left_ankle_x,landmark_left_ankle_y,landmark_left_ankle_z,landmark_left_ankle_visibility,landmark_right_ankle_x,landmark_right_ankle_y,landmark_right_ankle_z,landmark_right_ankle_visibility,landmark_left_heel_x,landmark_left_heel_y,landmark_left_heel_z,landmark_left_heel_visibility,landmark_right_heel_x,landmark_right_heel_y,landmark_right_heel_z,landmark_right_heel_visibility
+frame_number,timestamp_ms,speed_center_of_mass,angle_left_elbow,angle_right_elbow,angle_left_shoulder,angle_right_shoulder,angle_left_hip,angle_right_hip,angle_left_knee,angle_right_knee,angle_left_ankle,angle_right_ankle,angle_upper_back,angle_lower_back,landmark_nose_x,landmark_nose_y,landmark_nose_z,landmark_nose_visibility,landmark_left_shoulder_x,landmark_left_shoulder_y,landmark_left_shoulder_z,landmark_left_shoulder_visibility,landmark_right_shoulder_x,landmark_right_shoulder_y,landmark_right_shoulder_z,landmark_right_shoulder_visibility,landmark_left_elbow_x,landmark_left_elbow_y,landmark_left_elbow_z,landmark_left_elbow_visibility,landmark_right_elbow_x,landmark_right_elbow_y,landmark_right_elbow_z,landmark_right_elbow_visibility,landmark_left_wrist_x,landmark_left_wrist_y,landmark_left_wrist_z,landmark_left_wrist_visibility,landmark_right_wrist_x,landmark_right_wrist_y,landmark_right_wrist_z,landmark_right_wrist_visibility,landmark_left_hip_x,landmark_left_hip_y,landmark_left_hip_z,landmark_left_hip_visibility,landmark_right_hip_x,landmark_right_hip_y,landmark_right_hip_z,landmark_right_hip_visibility,landmark_left_knee_x,landmark_left_knee_y,landmark_left_knee_z,landmark_left_knee_visibility,landmark_right_knee_x,landmark_right_knee_y,landmark_right_knee_z,landmark_right_knee_visibility,landmark_left_ankle_x,landmark_left_ankle_y,landmark_left_ankle_z,landmark_left_ankle_visibility,landmark_right_ankle_x,landmark_right_ankle_y,landmark_right_ankle_z,landmark_right_ankle_visibility,landmark_left_heel_x,landmark_left_heel_y,landmark_left_heel_z,landmark_left_heel_visibility,landmark_right_heel_x,landmark_right_heel_y,landmark_right_heel_z,landmark_right_heel_visibility,landmark_left_eye_inner_x,landmark_left_eye_inner_y,landmark_left_eye_inner_z,landmark_left_eye_inner_visibility,landmark_left_eye_x,landmark_left_eye_y,landmark_left_eye_z,landmark_left_eye_visibility,landmark_left_eye_outer_x,landmark_left_eye_outer_y,landmark_left_eye_outer_z,landmark_left_eye_outer_visibility,landmark_right_eye_inner_x,landmark_right_eye_inner_y,landmark_right_eye_inner_z,landmark_right_eye_inner_visibility,landmark_right_eye_x,landmark_right_eye_y,landmark_right_eye_z,landmark_right_eye_visibility,landmark_right_eye_outer_x,landmark_right_eye_outer_y,landmark_right_eye_outer_z,landmark_right_eye_outer_visibility,landmark_left_ear_x,landmark_left_ear_y,landmark_left_ear_z,landmark_left_ear_visibility,landmark_right_ear_x,landmark_right_ear_y,landmark_right_ear_z,landmark_right_ear_visibility,landmark_mouth_left_x,landmark_mouth_left_y,landmark_mouth_left_z,landmark_mouth_left_visibility,landmark_mouth_right_x,landmark_mouth_right_y,landmark_mouth_right_z,landmark_mouth_right_visibility,landmark_left_pinky_x,landmark_left_pinky_y,landmark_left_pinky_z,landmark_left_pinky_visibility,landmark_right_pinky_x,landmark_right_pinky_y,landmark_right_pinky_z,landmark_right_pinky_visibility,landmark_left_index_x,landmark_left_index_y,landmark_left_index_z,landmark_left_index_visibility,landmark_right_index_x,landmark_right_index_y,landmark_right_index_z,landmark_right_index_visibility,landmark_left_thumb_x,landmark_left_thumb_y,landmark_left_thumb_z,landmark_left_thumb_visibility,landmark_right_thumb_x,landmark_right_thumb_y,landmark_right_thumb_z,landmark_right_thumb_visibility,landmark_left_foot_index_x,landmark_left_foot_index_y,landmark_left_foot_index_z,landmark_left_foot_index_visibility,landmark_right_foot_index_x,landmark_right_foot_index_y,landmark_right_foot_index_z,landmark_right_foot_index_visibility
 ```
 
 Value rules that must survive the rewrite:
@@ -113,7 +123,7 @@ Value rules that must survive the rewrite:
   *not* be used as the multiplier — the original `videoWidth`/`videoHeight` must be, or
   every coordinate silently shrinks and the overlay misaligns.
 - `z` is raw MediaPipe depth, passed through unscaled. `visibility` is `lm.visibility || 0`.
-- A frame with no detected pose emits `frame_number,timestamp_ms,0` then `''` for all 72
+- A frame with no detected pose emits `frame_number,timestamp_ms,0` then `''` for all 144
   remaining columns.
 - Numbers are stringified by `Array.join`, i.e. JS default formatting.
 
@@ -191,9 +201,10 @@ Per instruction, decisions were made without asking and are recorded here.
    WASM glue and JS wrapper must agree, and `@latest` defeats CDN caching.
 5. **`requestVideoFrameCallback` required**; no seek fallback. A browser without it
    gets a message naming Chrome, Edge and Safari in place of the upload panel.
-6. **CSV contract kept as shipped** (75 columns, 15 landmarks, 12 angles) rather than
-   the 33-landmark/10-angle shape named in the brief. See §1.4 — this is the one place
-   the brief and the code disagreed, and the code won. Raise it if that was wrong.
+6. **CSV contract initially kept as shipped** (75 columns, 15 landmarks, 12 angles)
+   rather than the 33-landmark shape named in the brief, since the brief and the code
+   disagreed. **Superseded:** the widening in §9 takes it to 147 columns / 33 landmarks,
+   additively. Angles stay at 12.
 7. **`REPORT.md` lives in `data_collection/frontend/`**, since the backend has its own.
 8. **Holes are filled, not skipped.** A missing frame index produces a pose-less row
    rather than a gap, because `SkeletonOverlay` indexes the CSV positionally.
@@ -396,3 +407,106 @@ bearer token, and this branch adds no login screen (§8). With no session you sh
   speed.
 - **No end-to-end timing has been measured** (§6). The headline performance claim is
   reasoned, not observed.
+
+---
+
+## 9. Landmark widening — 15 → 33 landmarks (follow-up)
+
+The CSV now carries **all 33 MediaPipe Pose landmarks**, `x`/`y`/`z`/`visibility` each,
+alongside the unchanged 12 angles. **147 columns**, up from 75.
+
+MediaPipe always returned all 33; the old `LANDMARK_MAP` simply discarded 18 of them
+before they reached the CSV. So this costs nothing at inference time — the landmarks were
+already computed and thrown away. The only real cost is file size (below).
+
+### Column order: additive, not canonical
+
+The 18 new landmarks are **appended after** the original 15 rather than interleaved into
+MediaPipe index order. Index order would have been tidier, but it would push
+`left_shoulder` from column 19 to column 23 and shift every column after it.
+
+Appending keeps the change **purely additive**: the first 75 columns are byte-for-byte
+what they were. A positional reader of the old format keeps working unchanged, and a
+name-based reader is unaffected either way. Within the appended block the 18 are in
+MediaPipe index order, so there is still a rule, just applied to the new columns only.
+
+New names are MediaPipe's canonical ones. The original 15 already used canonical names,
+so **no existing column name changed**:
+
+| Added | MediaPipe indices |
+|---|---|
+| Face — `left_eye_inner`, `left_eye`, `left_eye_outer`, `right_eye_inner`, `right_eye`, `right_eye_outer`, `left_ear`, `right_ear`, `mouth_left`, `mouth_right` | 1–10 |
+| Hands — `left_pinky`, `right_pinky`, `left_index`, `right_index`, `left_thumb`, `right_thumb` | 17–22 |
+| Feet — `left_foot_index`, `right_foot_index` | 31, 32 |
+
+For climbing, the hand and foot landmarks are the interesting ones: `left_index` /
+`left_thumb` / `left_pinky` give hand orientation on a hold, and `left_foot_index` gives
+toe position, none of which the heel-only foot model could express.
+
+### Golden file replaces the ad-hoc diff
+
+The previous byte-identical check compared against the old implementation recovered from
+git, which stops being possible once the contract deliberately changes. It is now a
+committed golden file:
+
+- `scripts/fixtures/golden_pose.csv` — 40 rows, 147 columns, 96,744 bytes.
+- `scripts/golden_frames.mjs` — the seeded, deterministic frames behind it, shared by the
+  generator and the test so the two cannot drift. It deliberately includes pose-less
+  frames, frames with individual landmarks missing, null angles, and the first frame's
+  zero centre-of-mass speed.
+- `npm run make-golden` regenerates it. **Regenerate only when the contract is meant to
+  change, and read the diff.**
+
+**33 tests pass** (was 25). The 8 new ones cover the golden bytes, the 147-column header,
+all 33 canonical names at their correct indices, the original 15 names surviving, and —
+the important one — *the first 75 columns of the golden file reproducing the
+pre-widening format exactly*.
+
+The golden test was checked for bite: reordering the landmarks into canonical index order
+fails 5 tests, and renaming a single landmark fails 5 tests. The row-count, `frame_index`
+contiguity and `timestamp = frame_index / fps` tests all still pass unchanged.
+
+### Backend check (read-only — no backend file modified)
+
+Both are column-agnostic; **no backend change is needed**:
+
+- **`POST /api/videos/register`** treats `csv_data` as opaque text. It length-checks the
+  UTF-8 bytes and puts the string straight to R2 (`api.py:591`, `api.py:612`). It never
+  parses columns.
+- **`exporter.py`** reads with `csv.DictReader` and builds its writer from
+  `list(reader.fieldnames) + self.label_columns()` (`exporter.py:50–52`, `150–155`) — it
+  passes whatever columns arrive straight through and appends the label columns. The only
+  column name it depends on is **`frame_number`** (`exporter.py:161`), which remains
+  column 1.
+- No `landmark_*` or `angle_*` name appears anywhere in the backend Python. The other
+  `frame_number` hits are the `frame_tags` table, unrelated to the pose CSV.
+
+### ⚠️ Size: this doubles the CSV, against a 60 MB cap
+
+Measured from the golden file: **1,154 → 2,330 bytes per row, a 2.02× increase.**
+
+| Clip | Pose CSV (was) | Pose CSV (now) |
+|---|---|---|
+| 2 min @ 30fps | ~4.0 MB | ~8.0 MB |
+| 2 min @ 60fps | ~7.9 MB | **~16.0 MB** |
+| 5 min @ 60fps | ~23.8 MB | **~48.0 MB** |
+
+`MAX_REGISTER_BYTES` in `api.py` is **60 MB**, and register returns `413` above it. The
+2-minute target case is comfortable at ~16 MB, but **a 60fps clip beyond roughly 6
+minutes will now be rejected where it previously fit.** Nothing here changes that cap —
+it is backend, and out of scope — but it is the one operational consequence of the
+widening, and worth knowing before someone uploads a long clip.
+
+Two cheap mitigations if it bites, neither done here: round coordinates to 2–3 decimals
+(most of the row is float noise well below pixel precision — likely a 30–40% saving on
+its own), or gzip the body.
+
+### One visible side effect
+
+`SkeletonOverlay` draws a joint dot for **every** `landmark_*` column it finds, so the
+overlay will now also dot the eyes, ears, mouth, fingers and toes — 33 dots instead of
+15. The skeleton *lines* are unchanged, since `SKELETON_CONNECTIONS` is a fixed list.
+Nothing breaks, but the overlay will look busier around the face. Left alone
+deliberately: trimming it is a display decision, not a data one. Filtering
+`extractLandmarks` to `LEGACY_LANDMARK_ORDER`, or giving face points a smaller radius,
+would be the fix if you want the old look.
