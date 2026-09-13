@@ -217,6 +217,111 @@ together, or stand up a staging service first.
 
 ---
 
+## ✅ Fifth update — final verification checks
+
+### Check 1: R2 steps 1-2 confirmed against the real bucket
+
+`scripts/verify_r2.py`, run with the real credentials from `.env`:
+
+```
+Verifying R2 bucket "dynalytix-climbing" at https://<account>.r2.cloudflarestorage.com
+
+direct object operations
+  PASS  put_object uploads
+  PASS  object_exists finds it
+  PASS  object_exists is False for a missing key
+  PASS  get_object_stream round-trips the bytes
+  PASS  missing key raises FileNotFoundError
+
+presigned URLs (plain HTTP, no credentials)
+  PASS  presigned_put_url returns a URL
+  PASS  PUT to the presigned URL succeeds
+  PASS  object landed in the bucket
+  PASS  GET from the presigned URL succeeds
+  PASS  presigned GET returns the same bytes
+
+10 passed, 0 failed
+```
+
+Presigned PUT and GET exercised with `curl`, outside the Python client:
+
+```
+=== curl PUT via presigned URL ===
+http=200 uploaded=35B
+=== curl GET via presigned URL ===
+frame_number,timestamp_ms
+0,0
+1,33
+http=200
+```
+
+**CORS.** `GetBucketCors` over the S3 API returns **AccessDenied**, and will
+continue to: the production token is Object Read & Write, and bucket
+configuration is admin-scoped. That is deliberate, not a gap. The rule was
+instead confirmed two ways that do not need admin rights:
+
+1. The dashboard read-back table (R2 → bucket → Settings → CORS Policy):
+   origins `*`, methods `GET, PUT, HEAD`, headers `Content-Type, Content-Length`.
+2. A live CORS **preflight** against a presigned PUT URL — the exact request a
+   browser makes before uploading:
+
+```
+$ curl -X OPTIONS -H "Origin: http://localhost:5173" \
+       -H "Access-Control-Request-Method: PUT" \
+       -H "Access-Control-Request-Headers: content-type" "<presigned PUT url>"
+
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Headers: content-type
+Access-Control-Allow-Methods: GET, PUT, HEAD
+Access-Control-Max-Age: 3600
+```
+
+R2's edge confirms the rule is live and that `http://localhost:5173` may PUT.
+This is stronger evidence than `GetBucketCors`, which only reads stored config;
+the preflight proves the enforced behaviour. To read the config over the API
+anyway, create a separate Admin Read & Write token.
+
+### Check 2: GitHub auto-deploy IS enabled on `main` — unchanged, as instructed
+
+`adorable-integrity` → Settings → Source:
+
+| Setting | State |
+|---|---|
+| Source Repo | `Jolieabadir/dynalytix` |
+| Branch connected to production | **`main`** |
+| Auto deploys when pushed to GitHub | **ENABLED** (the button offered is "Disable") |
+| Wait for CI | **OFF** — no CI gate; a push deploys straight away |
+| Root directory | none — builds the repo-root `Dockerfile` |
+
+The repo-root `Dockerfile` copies `data_collection/backend/` and runs
+`uvicorn src.web.api:app`, so it builds exactly this branch's backend. The
+running deployment's commit is `7be1840`, which is `main` HEAD precisely —
+consistent with auto-deploy having produced it.
+
+**So merging this branch to `main` deploys it within seconds, with no CI gate.**
+Confirming your concern. I changed nothing.
+
+**The important wrinkle:** the frontend deploys from `main` too.
+
+| Service | Repo | Branch | Root directory |
+|---|---|---|---|
+| `adorable-integrity` (climbing **backend**) | dynalytix | **`main`** | repo root |
+| `Data_collection_climbing` (climbing **frontend**) | dynalytix | **`main`** | `/data_collection/frontend` |
+| `Movement_analysis` (FMS frontend) | dynalytix | `fms-demo` | `/data_collection/frontend` |
+| `dynalytix` (FMS backend) | dynalytix | `fms-demo` | repo root |
+
+That turns out to be helpful rather than harmful: **one merge to `main` carrying
+both the backend and the frontend changes redeploys both services together**, so
+the coordinated cutover happens on its own. `railway up` is not needed.
+
+The danger is merging **only** the backend: the frontend service still rebuilds
+from the same push, from unchanged source, and comes back up talking v2 to a v3
+API. `collect.dynalytix.net` breaks either way if the two halves are merged
+separately.
+
+---
+
 ## ⛔ Second update — R2 and Railway are still not available
 
 A follow-up pass was requested on the premise that R2 credentials were in
@@ -726,84 +831,94 @@ the 61-test suite and the 35-check smoke run. What is unverified is the
 
 ---
 
-## 9. What you need to do manually
+## 9. Cutover checklist
 
-In order:
+R2, Supabase and the Railway variables are all done and verified. What is left
+is one coordinated release.
 
-~~1. Decide the Supabase project.~~ **Done** — `dynalytix-climbing` created, linked, migration applied and verified.
+### The one thing that governs everything
 
-~~2. Add `DATABASE_URL` to `.env`.~~ **Done** — points at the transaction pooler.
+`adorable-integrity` (backend) **and** `Data_collection_climbing` (frontend) both
+auto-deploy from **`main`**, with **Wait for CI off**. A push to `main` deploys
+both within seconds. There is no staging gate.
 
-3. ~~R2 bucket, token and CORS.~~ **Done** — bucket `dynalytix-climbing`,
-   object-scoped account token, CORS applied. Re-verify any time with:
-   ```bash
-   cd data_collection/backend
-   set -a && . ./.env && set +a
-   python scripts/verify_r2.py
-   ```
-   It exercises `put_object`, `object_exists`, `get_object_stream`, a real
-   credential-free HTTP PUT to a presigned URL and a presigned GET, cleaning up
-   after itself. The CORS step reports an expected skip, since the production
-   token cannot change bucket configuration by design.
-4. ~~Run the suite for real.~~ **Done** — 61 passed against the live database.
-   Note for future runs: the suite re-applies the migration, which **drops and
-   recreates** the labeling tables. That was safe on an empty project. Once real
-   labels exist, point `TEST_DATABASE_URL` at a separate throwaway database.
-5. **Railway — linked, variables set, deploy held.** The target was identified
-   by inspecting every project and service rather than guessing:
+Therefore: **do not merge this branch on its own.** Merge it together with
+Terminal C's frontend work, in a single merge to `main`.
 
-   | Service (project `steadfast-vitality`) | App vars | Domain | What it is |
-   |---|---|---|---|
-   | **`adorable-integrity`** | `GITHUB_TOKEN`, `DATA_REPO` | `adorable-integrity-production.up.railway.app` | **This backend.** `GET /` returns "Dynalytix Climbing API is running". |
-   | `Data_collection_climbing` | `VITE_API_URL` | `collect.dynalytix.net` | The climbing **frontend** (Vite). |
-   | `Movement_analysis` | `VITE_API_URL` | `analysis.dynalytix.net` | The FMS **frontend**. |
-   | `dynalytix` | `PORT`, `PYTHON_VERSION` | `dynalytix-production.up.railway.app` | The FMS backend. |
+### Before the merge
 
-   The service name gives nothing away; `GITHUB_TOKEN` + `DATA_REPO` (set by the
-   retired `data_sync.py`) identify it, and the live response confirms it. Note
-   the deploy target is **not** the service called `Data_collection_climbing` —
-   that is the UI.
+- [ ] Terminal C's frontend changes are complete against the §7 contract:
+      bearer token on every `/api` call, JSON body for `/api/videos/register`,
+      the three-step presigned upload flow, the four-slot environment shape,
+      `foot_cut` / `timing` / `dyno_style` / `traction_*` removed, and 307
+      redirects followed for CSV and export downloads.
+- [ ] Frontend `.env` points `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` at
+      the **new** project `nbqtgknayvsjkevaoeef`, not the old shared
+      `login_system` project. The `VITE_API_URL` service variable on
+      `Data_collection_climbing` still points at the backend and needs no change.
+- [ ] Someone can sign in on the new Supabase project — it has no users yet
+      beyond the two `smoke-test-*@dynalytix.test` accounts.
+- [ ] Decide about the old data. Labels in the old SQLite on the Railway disk
+      are already gone on every redeploy; exports live in the `dynalytix-data`
+      GitHub repo. Nothing is migrated — schema v3 starts empty by design.
 
-   The CLI is linked to `steadfast-vitality` / `adorable-integrity` / `production`.
+### The merge
 
-   > **⚠️ Deploying this branch will break the live site.** That service is up and
-   > serving `collect.dynalytix.net` right now, on the old build: `/api/config`
-   > still returns the pre-v3 taxonomy and `/api/health` 404s. The moment v3
-   > deploys, every request needs a bearer token and the request/response shapes
-   > change, so the current frontend stops working until Terminal C ships the
-   > changes in §7. Coordinate the two deploys, or deploy to a staging service
-   > first.
+- [ ] Merge the backend branch and the frontend branch to `main` **in one merge**.
+      Both services rebuild automatically. Watch both in the Railway dashboard.
 
-   Then set the variables:
-   ```bash
-   cd data_collection/backend
-   railway status                     # confirm the service before proceeding
-   railway variables --set DATABASE_URL="..." \
-                     --set SUPABASE_URL="..." \
-                     --set SUPABASE_ANON_KEY="..." \
-                     --set SUPABASE_SERVICE_ROLE_KEY="..." \
-                     --set R2_ACCOUNT_ID="..." \
-                     --set R2_ACCESS_KEY_ID="..." \
-                     --set R2_SECRET_ACCESS_KEY="..." \
-                     --set R2_BUCKET="..."
-   railway variables --unset GITHUB_TOKEN
-   railway variables --unset DATA_REPO
-   railway up
-   ```
-   Note `SUPABASE_JWT_SECRET` is deliberately absent — this project signs with
-   ES256 and the key is discovered from `SUPABASE_URL`. Use the **transaction
-   pooler** `DATABASE_URL` (port 6543); the direct host is IPv6-only.
-6. **Verify the deployment:**
-   ```bash
-   curl https://<service>.up.railway.app/api/health
-   # expect {"status":"ok","database":"ok","r2":"ok","schema_version":3}
-   python scripts/smoke_test.py --url https://<service>.up.railway.app
-   ```
-7. **Hand §7 to Terminal C** for the frontend. The frontend on `main` will not work against this API until it is updated — auth headers, the register body shape, the new environment slot structure and the removal of `POST /api/videos/upload` are all breaking.
-8. **Clean up the retired data** once you are satisfied: `data/labels.db`, `data/*.csv`, `data/exports/`, `videos/` are all dead weight now, as is the `dynalytix-data` GitHub repo.
+### Immediately after
 
-One local side effect to note: `postgresql@16` was started on this machine
-(`brew services start postgresql@16`) to validate the migration, and a scratch
-database `dynalytix_v3_check` was created. Remove them with
-`dropdb dynalytix_v3_check && brew services stop postgresql@16` if you do not
-want them running.
+- [ ] Unset the retired variables (left in place until now so the old build's
+      GitHub sync kept working):
+      ```bash
+      cd data_collection/backend
+      railway variables delete GITHUB_TOKEN --service adorable-integrity --environment production
+      railway variables delete DATA_REPO   --service adorable-integrity --environment production
+      ```
+      Each deletion triggers a redeploy; add `--skip-deploys` to batch them and
+      redeploy once.
+- [ ] Health check:
+      ```bash
+      curl https://adorable-integrity-production.up.railway.app/api/health
+      # expect {"status":"ok","database":"ok","r2":"ok","schema_version":3}
+      ```
+      `r2` must read `ok`, not `not configured`. `/api/config` now requires a
+      bearer token and returns 401 without one — that is correct behaviour.
+- [ ] Smoke test against the deployment, with R2 real rather than stubbed:
+      ```bash
+      set -a && . ./.env && set +a
+      python scripts/smoke_test.py --url https://adorable-integrity-production.up.railway.app
+      ```
+      It creates two throwaway users through the auth admin API, so it exercises
+      the project's real ES256 signing keys. Expect 35 passed, 0 failed.
+- [ ] Truncate the tables afterwards so the smoke test's rows do not pollute the
+      first real session:
+      ```bash
+      psql -d "$DATABASE_URL" -c "TRUNCATE frame_tags, outcomes, environments, moves, holds, videos RESTART IDENTITY CASCADE;"
+      ```
+- [ ] Click through one real labelling session on `collect.dynalytix.net`:
+      upload a video, mark a hold, label a move with all three lenses, export,
+      download.
+
+### Worth doing soon after
+
+- [ ] **Narrow CORS.** Both `api.py` (`allow_origins=["*"]`) and the bucket rule
+      are wide open. Now that the frontend origin is known, tighten both to
+      `["https://collect.dynalytix.net", "http://localhost:5173"]`.
+- [ ] **Consider turning off auto-deploy from `main`**, or pointing production at
+      a release branch. With Wait for CI off, any push to `main` currently ships
+      straight to a live service.
+- [ ] Delete the two `smoke-test-*@dynalytix.test` users if you would rather not
+      keep them (Supabase → Authentication → Users).
+- [ ] Retire the old storage: `data/labels.db`, `data/*.csv`, `data/exports/`,
+      `videos/`, and the `dynalytix-data` GitHub repo.
+- [ ] Rotate the R2 token if you would rather it had never passed through an
+      agent session; `.env` is the only place it lives locally.
+
+### If it goes wrong
+
+Railway keeps previous deployments: open the service → Deployments → pick the
+`7be1840` build → Redeploy. That restores the old backend. The Supabase project
+and R2 bucket are separate from it and are unaffected by a rollback.
+
